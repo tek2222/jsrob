@@ -5,7 +5,8 @@ class URDFReader {
             links: new Map(),
             joints: new Map(),
             rootLinks: [],
-            tree: new Map()
+            tree: new Map(),
+            actuators: new Map()
         };
     }
 
@@ -31,7 +32,8 @@ class URDFReader {
             links: new Map(),
             joints: new Map(),
             rootLinks: [],
-            tree: new Map()
+            tree: new Map(),
+            actuators: new Map()
         };
 
         const parser = new DOMParser();
@@ -58,6 +60,12 @@ class URDFReader {
             this.parseJoint(joint);
         }
 
+        // Parse actuators/transmissions if available
+        const transmissions = robot.getElementsByTagName('transmission');
+        for (const transmission of transmissions) {
+            this.parseTransmission(transmission);
+        }
+
         // Build tree structure
         this.buildTree();
 
@@ -70,6 +78,18 @@ class URDFReader {
                 if (filename && filename.toLowerCase().endsWith('.stl')) {
                     console.log(`Link "${linkName}": ${filename}`);
                 }
+            }
+        }
+        console.log('-------------------\n');
+
+        // Print summary of joint limits
+        console.log('\nJoint Limits Summary:');
+        console.log('-------------------');
+        for (const [jointName, joint] of this.robot.joints) {
+            if (joint.limit) {
+                console.log(`Joint "${jointName}": lower=${joint.limit.lower}, upper=${joint.limit.upper}, effort=${joint.limit.effort}, velocity=${joint.limit.velocity}`);
+            } else {
+                console.log(`Joint "${jointName}": no limits defined`);
             }
         }
         console.log('-------------------\n');
@@ -231,10 +251,50 @@ class URDFReader {
             calibration: this.parseCalibration(jointElement.getElementsByTagName('calibration')[0]),
             dynamics: this.parseDynamics(jointElement.getElementsByTagName('dynamics')[0]),
             safety_controller: this.parseSafetyController(jointElement.getElementsByTagName('safety_controller')[0]),
-            mimic: this.parseMimic(jointElement.getElementsByTagName('mimic')[0])
+            mimic: this.parseMimic(jointElement.getElementsByTagName('mimic')[0]),
+            currentPosition: 0,
+            targetPosition: 0,
+            isMoving: false
         };
 
         this.robot.joints.set(name, joint);
+    }
+
+    parseTransmission(transmissionElement) {
+        if (!transmissionElement) return null;
+
+        const name = transmissionElement.getAttribute('name');
+        if (!name) return;
+
+        const type = transmissionElement.getElementsByTagName('type')[0]?.textContent;
+        const jointElement = transmissionElement.getElementsByTagName('joint')[0];
+        const actuatorElement = transmissionElement.getElementsByTagName('actuator')[0];
+
+        if (!jointElement || !actuatorElement) return;
+
+        const jointName = jointElement.getAttribute('name');
+        const actuatorName = actuatorElement.getAttribute('name');
+
+        if (!jointName || !actuatorName) return;
+
+        const hardwareInterface = jointElement.getElementsByTagName('hardwareInterface')[0]?.textContent;
+        const mechanicalReduction = parseFloat(transmissionElement.getElementsByTagName('mechanicalReduction')[0]?.textContent) || 1.0;
+
+        const actuator = {
+            name: actuatorName,
+            type: type,
+            jointName: jointName,
+            hardwareInterface: hardwareInterface,
+            mechanicalReduction: mechanicalReduction
+        };
+
+        this.robot.actuators.set(actuatorName, actuator);
+        
+        // Link the actuator to the joint
+        const joint = this.robot.joints.get(jointName);
+        if (joint) {
+            joint.actuator = actuatorName;
+        }
     }
 
     parseOrigin(originElement) {
@@ -265,10 +325,10 @@ class URDFReader {
         if (!limitElement) return null;
 
         return {
-            lower: parseFloat(limitElement.getAttribute('lower')),
-            upper: parseFloat(limitElement.getAttribute('upper')),
-            effort: parseFloat(limitElement.getAttribute('effort')),
-            velocity: parseFloat(limitElement.getAttribute('velocity'))
+            lower: parseFloat(limitElement.getAttribute('lower') || 0),
+            upper: parseFloat(limitElement.getAttribute('upper') || 0),
+            effort: parseFloat(limitElement.getAttribute('effort') || 0),
+            velocity: parseFloat(limitElement.getAttribute('velocity') || 0)
         };
     }
 
@@ -285,8 +345,8 @@ class URDFReader {
         if (!dynamicsElement) return null;
 
         return {
-            damping: parseFloat(dynamicsElement.getAttribute('damping')),
-            friction: parseFloat(dynamicsElement.getAttribute('friction'))
+            damping: parseFloat(dynamicsElement.getAttribute('damping') || 0),
+            friction: parseFloat(dynamicsElement.getAttribute('friction') || 0)
         };
     }
 
@@ -306,8 +366,8 @@ class URDFReader {
 
         return {
             joint: mimicElement.getAttribute('joint'),
-            multiplier: parseFloat(mimicElement.getAttribute('multiplier')),
-            offset: parseFloat(mimicElement.getAttribute('offset'))
+            multiplier: parseFloat(mimicElement.getAttribute('multiplier') || 1),
+            offset: parseFloat(mimicElement.getAttribute('offset') || 0)
         };
     }
 
@@ -376,7 +436,18 @@ class URDFReader {
             for (let i = 0; i < children.length; i++) {
                 const child = children[i];
                 const isLastChild = i === children.length - 1;
-                output += prefix + (isLast ? '    ' : '│   ') + `[${child.joint}]` + '\n';
+                const joint = this.robot.joints.get(child.joint);
+                let jointInfo = child.joint;
+                
+                if (joint && joint.type !== 'fixed') {
+                    if (joint.limit) {
+                        jointInfo += ` [${joint.type}, ${joint.limit.lower.toFixed(2)} to ${joint.limit.upper.toFixed(2)}]`;
+                    } else {
+                        jointInfo += ` [${joint.type}]`;
+                    }
+                }
+                
+                output += prefix + (isLast ? '    ' : '│   ') + `[${jointInfo}]` + '\n';
                 displayNode(child.child, level + 1, isLastChild);
             }
         };
@@ -386,5 +457,137 @@ class URDFReader {
         }
 
         return output;
+    }
+
+    /**
+     * Set a joint position while respecting joint limits
+     * @param {string} jointName - The name of the joint to set
+     * @param {number} position - The target position in radians
+     * @returns {number} - The actual position after applying limits
+     */
+    setJointPosition(jointName, position) {
+        const joint = this.robot.joints.get(jointName);
+        if (!joint) {
+            console.warn(`Joint ${jointName} not found`);
+            return null;
+        }
+
+        // Only movable joints can have their position set
+        if (joint.type === 'fixed') {
+            console.warn(`Cannot set position for fixed joint ${jointName}`);
+            return joint.currentPosition;
+        }
+
+        // Apply joint limits if they exist
+        let limitedPosition = position;
+        if (joint.limit) {
+            limitedPosition = Math.max(joint.limit.lower, Math.min(joint.limit.upper, position));
+            
+            // Log if the position was limited
+            if (limitedPosition !== position) {
+                console.warn(`Joint ${jointName} position limited from ${position.toFixed(4)} to ${limitedPosition.toFixed(4)} [limits: ${joint.limit.lower.toFixed(4)} to ${joint.limit.upper.toFixed(4)}]`);
+            }
+        }
+
+        // Update the joint position
+        joint.currentPosition = limitedPosition;
+        return limitedPosition;
+    }
+
+    /**
+     * Get the current position of a joint
+     * @param {string} jointName - The name of the joint
+     * @returns {number} - The current position in radians
+     */
+    getJointPosition(jointName) {
+        const joint = this.robot.joints.get(jointName);
+        if (!joint) {
+            console.warn(`Joint ${jointName} not found`);
+            return null;
+        }
+        return joint.currentPosition;
+    }
+
+    /**
+     * Get the joint limits
+     * @param {string} jointName - The name of the joint
+     * @returns {Object|null} - The joint limits or null if not defined
+     */
+    getJointLimits(jointName) {
+        const joint = this.robot.joints.get(jointName);
+        if (!joint) {
+            console.warn(`Joint ${jointName} not found`);
+            return null;
+        }
+        return joint.limit;
+    }
+
+    /**
+     * Check if a joint position is within limits
+     * @param {string} jointName - The name of the joint
+     * @param {number} position - The position to check
+     * @returns {boolean} - True if within limits or no limits defined
+     */
+    isWithinJointLimits(jointName, position) {
+        const joint = this.robot.joints.get(jointName);
+        if (!joint) {
+            console.warn(`Joint ${jointName} not found`);
+            return false;
+        }
+
+        if (!joint.limit) {
+            // No limits defined, so any position is valid
+            return true;
+        }
+
+        return position >= joint.limit.lower && position <= joint.limit.upper;
+    }
+
+    /**
+     * Get all movable joints (non-fixed)
+     * @returns {Array} - Array of joint names
+     */
+    getMovableJoints() {
+        return Array.from(this.robot.joints.entries())
+            .filter(([_, joint]) => joint.type !== 'fixed')
+            .map(([name, _]) => name);
+    }
+
+    /**
+     * Get information about an actuator
+     * @param {string} actuatorName - The name of the actuator
+     * @returns {Object|null} - The actuator data or null if not found
+     */
+    getActuator(actuatorName) {
+        return this.robot.actuators.get(actuatorName) || null;
+    }
+
+    /**
+     * Get the actuator associated with a joint
+     * @param {string} jointName - The name of the joint
+     * @returns {Object|null} - The actuator data or null if not found
+     */
+    getJointActuator(jointName) {
+        const joint = this.robot.joints.get(jointName);
+        if (!joint || !joint.actuator) {
+            return null;
+        }
+        return this.robot.actuators.get(joint.actuator) || null;
+    }
+
+    /**
+     * Reset all joint positions to zero or their default positions
+     */
+    resetJointPositions() {
+        for (const joint of this.robot.joints.values()) {
+            if (joint.type !== 'fixed') {
+                // Set to middle of range if limits exist, otherwise zero
+                if (joint.limit) {
+                    joint.currentPosition = (joint.limit.upper + joint.limit.lower) / 2;
+                } else {
+                    joint.currentPosition = 0;
+                }
+            }
+        }
     }
 } 

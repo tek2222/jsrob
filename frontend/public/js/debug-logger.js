@@ -20,7 +20,7 @@ class DebugLogger {
     /**
      * Logs a message to both the UI console and browser console
      * @param {string} message - The message to log
-     * @param {string} type - The type of message (info, success, warning, error)
+     * @param {string} type - The type of message (info, success, warning, error, debug)
      */
     log(message, type = 'info') {
         if (!this.console) {
@@ -66,6 +66,20 @@ class DebugLogger {
      */
     error(message) { 
         this.log(message, 'error'); 
+    }
+    
+    /**
+     * Logs a debug message (only to browser console by default)
+     * @param {string} message - The message to log
+     * @param {boolean} showInUI - Whether to show the message in the UI console
+     */
+    debug(message, showInUI = false) {
+        if (showInUI) {
+            this.log(message, 'debug');
+        } else {
+            // Only log to browser console
+            console.debug(`[debug] ${message}`);
+        }
     }
 
     /**

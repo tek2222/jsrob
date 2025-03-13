@@ -7,9 +7,11 @@ class JointAnimator {
     /**
      * Creates a new JointAnimator instance
      * @param {DebugLogger} logger - The logger instance to use for logging
+     * @param {URDFReader} urdfReader - The URDF reader instance
      */
-    constructor(logger) {
+    constructor(logger, urdfReader) {
         this.logger = logger || console;
+        this.urdfReader = urdfReader;
         this.isAnimating = false;
         this.currentJointIndex = 0;
         this.animationTime = 0;
@@ -18,6 +20,20 @@ class JointAnimator {
         this.jointData = new Map();
         this.jointAngles = new Map();
         this.animationCallback = null;
+        
+        // Verify that the URDFReader has the required methods
+        if (this.urdfReader) {
+            this.hasValidReader = typeof this.urdfReader.getJointPosition === 'function' && 
+                                 typeof this.urdfReader.setJointPosition === 'function' &&
+                                 typeof this.urdfReader.getJointLimits === 'function';
+            
+            if (!this.hasValidReader) {
+                this.logger.warning('URDFReader does not have required methods. Joint limits will not be enforced.');
+            }
+        } else {
+            this.hasValidReader = false;
+            this.logger.warning('No URDFReader provided. Joint limits will not be enforced.');
+        }
     }
 
     /**
@@ -33,6 +49,80 @@ class JointAnimator {
         // Initialize joint angles
         for (const jointName of this.jointObjects.keys()) {
             this.jointAngles.set(jointName, 0);
+            
+            // If we have a valid URDF reader, initialize with the current position from there
+            if (this.hasValidReader) {
+                try {
+                    const position = this.urdfReader.getJointPosition(jointName);
+                    if (position !== null) {
+                        this.jointAngles.set(jointName, position);
+                    }
+                } catch (error) {
+                    this.logger.error(`Error getting joint position for ${jointName}: ${error.message}`);
+                }
+            }
+        }
+    }
+
+    /**
+     * Safely gets a joint position from the URDF reader
+     * @param {string} jointName - The name of the joint
+     * @returns {number} - The joint position or 0 if not available
+     * @private
+     */
+    _safeGetJointPosition(jointName) {
+        if (!this.hasValidReader) return this.jointAngles.get(jointName) || 0;
+        
+        try {
+            const position = this.urdfReader.getJointPosition(jointName);
+            return position !== null ? position : (this.jointAngles.get(jointName) || 0);
+        } catch (error) {
+            this.logger.error(`Error getting joint position for ${jointName}: ${error.message}`);
+            return this.jointAngles.get(jointName) || 0;
+        }
+    }
+
+    /**
+     * Safely sets a joint position in the URDF reader
+     * @param {string} jointName - The name of the joint
+     * @param {number} position - The position to set
+     * @returns {number} - The actual position set
+     * @private
+     */
+    _safeSetJointPosition(jointName, position) {
+        if (!this.hasValidReader) {
+            this.jointAngles.set(jointName, position);
+            return position;
+        }
+        
+        try {
+            const actualPosition = this.urdfReader.setJointPosition(jointName, position);
+            return actualPosition !== null ? actualPosition : position;
+        } catch (error) {
+            this.logger.error(`Error setting joint position for ${jointName}: ${error.message}`);
+            this.jointAngles.set(jointName, position);
+            return position;
+        }
+    }
+
+    /**
+     * Safely gets joint limits from the URDF reader
+     * @param {string} jointName - The name of the joint
+     * @returns {Object|null} - The joint limits or null if not available
+     * @private
+     */
+    _safeGetJointLimits(jointName) {
+        if (!this.hasValidReader) {
+            const jointData = this.jointData.get(jointName);
+            return jointData ? jointData.limit : null;
+        }
+        
+        try {
+            return this.urdfReader.getJointLimits(jointName);
+        } catch (error) {
+            this.logger.error(`Error getting joint limits for ${jointName}: ${error.message}`);
+            const jointData = this.jointData.get(jointName);
+            return jointData ? jointData.limit : null;
         }
     }
 
@@ -44,6 +134,17 @@ class JointAnimator {
     startAnimation(callback) {
         if (!this.jointObjects || this.jointObjects.size === 0) {
             this.logger.warning('No joints available to animate');
+            return false;
+        }
+        
+        // Filter out fixed joints for animation
+        const animatableJoints = Array.from(this.jointObjects.keys()).filter(jointName => {
+            const jointData = this.jointData.get(jointName);
+            return jointData && jointData.type !== 'fixed';
+        });
+        
+        if (animatableJoints.length === 0) {
+            this.logger.warning('No movable joints available to animate');
             return false;
         }
         
@@ -74,8 +175,18 @@ class JointAnimator {
 
         this.animationTime += deltaTime;
         
-        const jointNames = Array.from(this.jointObjects.keys());
-        const currentJoint = jointNames[this.currentJointIndex];
+        // Filter out fixed joints
+        const animatableJoints = Array.from(this.jointObjects.keys()).filter(jointName => {
+            const jointData = this.jointData.get(jointName);
+            return jointData && jointData.type !== 'fixed';
+        });
+        
+        if (animatableJoints.length === 0) {
+            this.stopAnimation();
+            return null;
+        }
+        
+        const currentJoint = animatableJoints[this.currentJointIndex];
         const jointObject = this.jointObjects.get(currentJoint);
         const jointData = this.jointData.get(currentJoint);
         
@@ -94,7 +205,7 @@ class JointAnimator {
             }
             
             // Cycle back to the first joint if we've animated all joints
-            if (this.currentJointIndex >= this.jointObjects.size) {
+            if (this.currentJointIndex >= animatableJoints.length) {
                 this.currentJointIndex = 0;
             }
         }
@@ -127,16 +238,45 @@ class JointAnimator {
         const progress = this.animationTime / this.animationDuration;
         let angle;
         
-        if (progress < 0.25) {
-            // First quarter: 0 to +45 degrees
-            angle = (progress * 4) * Math.PI / 4;
-        } else if (progress < 0.75) {
-            // Middle half: +45 to -45 degrees
-            angle = ((0.5 - (progress - 0.25) * 2) * Math.PI / 2);
+        // Get joint limits if available
+        let lowerLimit = -Math.PI/4;
+        let upperLimit = Math.PI/4;
+        
+        if (jointData.limit) {
+            lowerLimit = jointData.limit.lower;
+            upperLimit = jointData.limit.upper;
         } else {
-            // Last quarter: -45 to 0 degrees
-            angle = (-1 + (progress - 0.75) * 4) * Math.PI / 4;
+            const limits = this._safeGetJointLimits(jointName);
+            if (limits) {
+                lowerLimit = limits.lower;
+                upperLimit = limits.upper;
+            }
         }
+        
+        // Calculate animation range based on joint limits
+        const range = upperLimit - lowerLimit;
+        const midPoint = (upperLimit + lowerLimit) / 2;
+        const amplitude = Math.min(range / 2, Math.PI/4); // Use smaller of range/2 or 45 degrees
+        
+        if (progress < 0.25) {
+            // First quarter: mid to mid+amplitude
+            angle = midPoint + (progress * 4) * amplitude;
+        } else if (progress < 0.75) {
+            // Middle half: mid+amplitude to mid-amplitude
+            angle = midPoint + (0.5 - (progress - 0.25) * 2) * 2 * amplitude;
+        } else {
+            // Last quarter: mid-amplitude to mid
+            angle = midPoint + (-1 + (progress - 0.75) * 4) * amplitude;
+        }
+        
+        // Ensure angle is within limits
+        angle = Math.max(lowerLimit, Math.min(upperLimit, angle));
+        
+        // Update the joint angle in the URDF reader if available
+        this._safeSetJointPosition(jointName, angle);
+        
+        // Store the current angle
+        this.jointAngles.set(jointName, angle);
         
         // Get the joint's axis of rotation
         const axis = jointData.axis || [0, 0, 1];
@@ -167,7 +307,7 @@ class JointAnimator {
         // Combine with existing rotation
         jointObject.quaternion.multiply(rotQuat);
         
-        this.logger.info(`Joint ${jointName} angle: ${(angle * 180 / Math.PI).toFixed(2)}° around axis [${axis.join(', ')}]`);
+        this.logger.info(`Joint ${jointName} angle: ${(angle * 180 / Math.PI).toFixed(2)}° around axis [${axis.join(', ')}] (limits: ${(lowerLimit * 180 / Math.PI).toFixed(2)}° to ${(upperLimit * 180 / Math.PI).toFixed(2)}°)`);
     }
 
     /**
@@ -194,10 +334,34 @@ class JointAnimator {
             return;
         }
         
+        // Skip fixed joints
+        if (jointData.type === 'fixed') {
+            this.logger.warning(`Cannot adjust fixed joint ${jointName}`);
+            return;
+        }
+        
         // Get current angle and update it
         let currentAngle = this.jointAngles.get(jointName) || 0;
-        currentAngle += deltaAngle;
-        this.jointAngles.set(jointName, currentAngle);
+        let newAngle = currentAngle + deltaAngle;
+        
+        // Apply joint limits
+        if (jointData.limit) {
+            newAngle = Math.max(jointData.limit.lower, Math.min(jointData.limit.upper, newAngle));
+            
+            // Log if the angle was limited
+            if (newAngle !== currentAngle + deltaAngle) {
+                this.logger.warning(`Joint ${jointName} angle limited to ${(newAngle * 180 / Math.PI).toFixed(2)}° (limits: ${(jointData.limit.lower * 180 / Math.PI).toFixed(2)}° to ${(jointData.limit.upper * 180 / Math.PI).toFixed(2)}°)`);
+            }
+        } else {
+            // Use URDF reader to apply limits if available
+            const actualAngle = this._safeSetJointPosition(jointName, newAngle);
+            if (actualAngle !== newAngle) {
+                newAngle = actualAngle;
+            }
+        }
+        
+        // Store the current angle
+        this.jointAngles.set(jointName, newAngle);
         
         // Get the joint's axis of rotation
         const axis = jointData.axis || [0, 0, 1];
@@ -223,24 +387,36 @@ class JointAnimator {
         // Apply joint rotation around axis
         const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
         const rotQuat = new THREE.Quaternion();
-        rotQuat.setFromAxisAngle(axisVec, currentAngle);
+        rotQuat.setFromAxisAngle(axisVec, newAngle);
         
         // Combine with existing rotation
         jointObject.quaternion.multiply(rotQuat);
         
-        this.logger.info(`Joint ${jointName} angle adjusted to: ${(currentAngle * 180 / Math.PI).toFixed(2)}° around axis [${axis.join(', ')}]`);
+        this.logger.info(`Joint ${jointName} angle adjusted to: ${(newAngle * 180 / Math.PI).toFixed(2)}° around axis [${axis.join(', ')}]`);
         
-        return currentAngle;
+        return newAngle;
     }
 
     /**
      * Resets a specific joint to its initial position
-     * @private
      * @param {string} jointName - The name of the joint to reset
-     * @param {THREE.Object3D} jointObject - The joint object to reset
-     * @param {Object} jointData - The joint data from URDF
+     * @param {THREE.Object3D} [jointObject] - The joint object to reset (optional)
+     * @param {Object} [jointData] - The joint data from URDF (optional)
      */
     resetJoint(jointName, jointObject, jointData) {
+        // If jointObject and jointData are not provided, try to get them from the maps
+        if (!jointObject) {
+            jointObject = this.jointObjects.get(jointName);
+        }
+        if (!jointData) {
+            jointData = this.jointData.get(jointName);
+        }
+        
+        if (!jointObject || !jointData) {
+            this.logger.warning(`Cannot reset joint ${jointName}: object or data not found`);
+            return;
+        }
+        
         jointObject.position.set(0, 0, 0);
         jointObject.quaternion.set(0, 0, 0, 1);
         jointObject.scale.set(1, 1, 1);
@@ -254,25 +430,55 @@ class JointAnimator {
             jointObject.setRotationFromEuler(euler);
         }
         
-        this.jointAngles.set(jointName, 0);
-    }
-
-    /**
-     * Resets all joint angles to zero
-     */
-    resetJointAngles() {
-        for (const [jointName, angle] of this.jointAngles.entries()) {
-            if (angle !== 0) {
-                const jointObject = this.jointObjects.get(jointName);
-                const jointData = this.jointData.get(jointName);
-                
-                if (jointObject && jointData) {
-                    this.resetJoint(jointName, jointObject, jointData);
-                }
+        // Reset to middle of range if limits exist
+        let resetPosition = 0;
+        if (jointData.limit) {
+            resetPosition = (jointData.limit.upper + jointData.limit.lower) / 2;
+        } else {
+            const limits = this._safeGetJointLimits(jointName);
+            if (limits) {
+                resetPosition = (limits.upper + limits.lower) / 2;
             }
         }
         
-        this.logger.info('All joint angles reset to zero');
+        // Update the joint angle in the URDF reader if available
+        this._safeSetJointPosition(jointName, resetPosition);
+        
+        this.jointAngles.set(jointName, resetPosition);
+        
+        // Apply the reset position to the joint
+        const axis = jointData.axis || [0, 0, 1];
+        const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
+        const rotQuat = new THREE.Quaternion();
+        rotQuat.setFromAxisAngle(axisVec, resetPosition);
+        jointObject.quaternion.multiply(rotQuat);
+        
+        this.logger.info(`Reset joint ${jointName} to ${(resetPosition * 180 / Math.PI).toFixed(2)}°`);
+    }
+
+    /**
+     * Resets all joint angles to zero or middle of their range
+     */
+    resetJointAngles() {
+        for (const [jointName, angle] of this.jointAngles.entries()) {
+            const jointObject = this.jointObjects.get(jointName);
+            const jointData = this.jointData.get(jointName);
+            
+            if (jointObject && jointData) {
+                this.resetJoint(jointName, jointObject, jointData);
+            }
+        }
+        
+        // If we have a valid URDF reader, use it to reset all joints
+        if (this.hasValidReader) {
+            try {
+                this.urdfReader.resetJointPositions();
+            } catch (error) {
+                this.logger.error(`Error resetting joint positions: ${error.message}`);
+            }
+        }
+        
+        this.logger.info('All joint angles reset');
     }
 
     /**
@@ -281,6 +487,18 @@ class JointAnimator {
      * @returns {number} - The current angle in radians
      */
     getJointAngle(jointName) {
+        // If we have a valid URDF reader, use it to get the current position
+        if (this.hasValidReader) {
+            try {
+                const position = this.urdfReader.getJointPosition(jointName);
+                if (position !== null) {
+                    return position;
+                }
+            } catch (error) {
+                this.logger.error(`Error getting joint position for ${jointName}: ${error.message}`);
+            }
+        }
+        
         return this.jointAngles.get(jointName) || 0;
     }
 
@@ -289,8 +507,13 @@ class JointAnimator {
      * @returns {Object} - The current animation state
      */
     getAnimationState() {
-        const jointNames = Array.from(this.jointObjects.keys());
-        const currentJoint = jointNames[this.currentJointIndex];
+        // Filter out fixed joints
+        const animatableJoints = Array.from(this.jointObjects.keys()).filter(jointName => {
+            const jointData = this.jointData.get(jointName);
+            return jointData && jointData.type !== 'fixed';
+        });
+        
+        const currentJoint = animatableJoints[this.currentJointIndex] || '';
         
         return {
             isAnimating: this.isAnimating,

@@ -20,36 +20,41 @@
                 });
             }
 
-            Promise.all([
-                loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/STLLoader.js'),
-                loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/ColladaLoader.js'),
-                loadScript('js/three-utils.js'),
-                loadScript('js/debug-logger.js'),
-                loadScript('js/mesh-loader.js'),
-                loadScript('js/joint-animator.js'),
-                loadScript('urdfreader.js'),
-                loadScript('js/urdf-visualizer.js')
-            ]).then(() => {
-                // Initialize the viewer after all scripts are loaded
-                if (typeof THREE === 'undefined') {
-                    throw new Error('Three.js failed to load');
-                }
-                if (typeof THREE.STLLoader === 'undefined') {
-                    throw new Error('STLLoader failed to load');
-                }
-                if (typeof THREE.ColladaLoader === 'undefined') {
-                    throw new Error('ColladaLoader failed to load');
-                }
-                // Initialize the visualizer
-                window.visualizer = new URDFVisualizer();
-            }).catch(error => {
-                console.error('Error loading scripts:', error);
-                const debugConsole = document.getElementById('debugConsole');
-                if (debugConsole) {
-                    const timestamp = new Date().toLocaleTimeString();
-                    debugConsole.innerHTML = `<div><span class="timestamp">[${timestamp}]</span> <span class="error">Error loading required scripts: ${error.message}</span></div>`;
-                }
-            });
+            // Load scripts in a specific order to ensure dependencies are met
+            loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/STLLoader.js')
+                .then(() => loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/ColladaLoader.js'))
+                .then(() => loadScript('js/three-utils.js'))
+                .then(() => loadScript('js/debug-logger.js'))
+                .then(() => loadScript('urdfreader.js')) // Load URDFReader before dependent modules
+                .then(() => loadScript('js/mesh-loader.js'))
+                .then(() => loadScript('js/joint-animator.js'))
+                .then(() => loadScript('js/urdf-visualizer.js'))
+                .then(() => {
+                    // Initialize the viewer after all scripts are loaded
+                    if (typeof THREE === 'undefined') {
+                        throw new Error('Three.js failed to load');
+                    }
+                    if (typeof THREE.STLLoader === 'undefined') {
+                        throw new Error('STLLoader failed to load');
+                    }
+                    if (typeof THREE.ColladaLoader === 'undefined') {
+                        throw new Error('ColladaLoader failed to load');
+                    }
+                    if (typeof URDFReader === 'undefined') {
+                        throw new Error('URDFReader failed to load');
+                    }
+                    
+                    // Initialize the visualizer
+                    window.visualizer = new URDFVisualizer();
+                })
+                .catch(error => {
+                    console.error('Error loading scripts:', error);
+                    const debugConsole = document.getElementById('debugConsole');
+                    if (debugConsole) {
+                        const timestamp = new Date().toLocaleTimeString();
+                        debugConsole.innerHTML = `<div><span class="timestamp">[${timestamp}]</span> <span class="error">Error loading required scripts: ${error.message}</span></div>`;
+                    }
+                });
         });
     </script>
     <style>
@@ -178,6 +183,10 @@
         #debugConsole .info {
             color: #00ff00;
         }
+        #debugConsole .debug {
+            color: #aaaaaa;
+            font-style: italic;
+        }
         h2 {
             margin: 0 0 16px 0;
             font-size: 18px;
@@ -195,12 +204,11 @@
             overflow-y: auto;
         }
         .joint-control {
-            margin-bottom: 8px;
-            padding-bottom: 8px;
+            margin-bottom: 12px;
+            padding-bottom: 12px;
             border-bottom: 1px solid #ddd;
             display: flex;
-            align-items: center;
-            flex-wrap: wrap;
+            flex-direction: column;
         }
         .joint-name {
             font-weight: bold;
@@ -209,9 +217,16 @@
             flex: 1;
             min-width: 80px;
         }
+        .joint-limits {
+            font-size: 11px;
+            color: #666;
+            margin-bottom: 5px;
+            font-style: italic;
+        }
         .joint-buttons {
             display: flex;
-            gap: 3px;
+            gap: 5px;
+            margin: 5px 0;
         }
         .joint-buttons button {
             flex: 0 0 auto;
@@ -226,12 +241,33 @@
         .increment {
             background-color: #2196F3;
         }
+        .reset {
+            background-color: #9e9e9e;
+        }
         .joint-angle {
             text-align: right;
             margin-left: 8px;
             font-size: 11px;
             font-family: monospace;
             min-width: 50px;
+        }
+        .slider-container {
+            margin-top: 5px;
+            width: 100%;
+        }
+        .joint-slider {
+            width: 100%;
+            margin: 0;
+        }
+        .global-reset {
+            margin-top: 15px;
+            text-align: center;
+            padding-top: 10px;
+            border-top: 1px solid #ddd;
+        }
+        .global-reset button {
+            background-color: #673ab7;
+            width: 100%;
         }
     </style>
 </head>

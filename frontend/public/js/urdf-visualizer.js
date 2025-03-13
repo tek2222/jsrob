@@ -20,7 +20,9 @@ class URDFVisualizer {
             animationStatusId: 'animationStatus',
             treeStructureId: 'treeStructure',
             jointControlsId: 'jointControls',
-            jointControlsContainerId: 'jointControlsContainer'
+            jointControlsContainerId: 'jointControlsContainer',
+            showJointLimits: true,
+            jointStepSize: 2 // Default step size in degrees
         };
         
         this.options = { ...defaults, ...options };
@@ -29,7 +31,7 @@ class URDFVisualizer {
         this.logger = new DebugLogger(this.options.debugConsoleId);
         this.urdfReader = new URDFReader();
         this.meshLoader = new MeshLoader(this.logger);
-        this.jointAnimator = new JointAnimator(this.logger);
+        this.jointAnimator = new JointAnimator(this.logger, this.urdfReader);
         
         // Initialize Three.js objects
         this.scene = null;
@@ -579,25 +581,44 @@ class URDFVisualizer {
             const jointControlDiv = document.createElement('div');
             jointControlDiv.className = 'joint-control';
             
+            // Create joint name and type display
             const jointNameDiv = document.createElement('div');
             jointNameDiv.className = 'joint-name';
-            jointNameDiv.textContent = jointName;
+            
+            // Add joint type to the display
+            let jointTypeInfo = jointData.type;
+            jointNameDiv.textContent = `${jointName} (${jointTypeInfo})`;
             jointControlDiv.appendChild(jointNameDiv);
+            
+            // Add joint limits display if available and enabled
+            if (this.options.showJointLimits && jointData.limit) {
+                const limitsDiv = document.createElement('div');
+                limitsDiv.className = 'joint-limits';
+                const lowerDeg = (jointData.limit.lower * 180 / Math.PI).toFixed(1);
+                const upperDeg = (jointData.limit.upper * 180 / Math.PI).toFixed(1);
+                limitsDiv.textContent = `Limits: ${lowerDeg}° to ${upperDeg}°`;
+                jointControlDiv.appendChild(limitsDiv);
+            }
             
             const jointButtonsDiv = document.createElement('div');
             jointButtonsDiv.className = 'joint-buttons';
             
-            // Create decrement button (-2 degrees)
+            // Calculate step size in radians
+            const stepSizeRad = this.options.jointStepSize * Math.PI / 180;
+            
+            // Create decrement button
             const decrementButton = document.createElement('button');
             decrementButton.className = 'decrement';
-            decrementButton.textContent = '-2°';
+            decrementButton.textContent = `-${this.options.jointStepSize}°`;
             
             // Add continuous rotation with mousedown/touchstart events
             let decrementInterval;
             decrementButton.addEventListener('mousedown', () => {
-                this.jointAnimator.adjustJointAngle(jointName, -2 * Math.PI / 180);
+                this.jointAnimator.adjustJointAngle(jointName, -stepSizeRad);
+                this.updateJointAngleDisplay(jointName);
                 decrementInterval = setInterval(() => {
-                    this.jointAnimator.adjustJointAngle(jointName, -2 * Math.PI / 180);
+                    this.jointAnimator.adjustJointAngle(jointName, -stepSizeRad);
+                    this.updateJointAngleDisplay(jointName);
                 }, 100); // Adjust every 100ms while button is held
             });
             
@@ -615,17 +636,19 @@ class URDFVisualizer {
             
             jointButtonsDiv.appendChild(decrementButton);
             
-            // Create increment button (+2 degrees)
+            // Create increment button
             const incrementButton = document.createElement('button');
             incrementButton.className = 'increment';
-            incrementButton.textContent = '+2°';
+            incrementButton.textContent = `+${this.options.jointStepSize}°`;
             
             // Add continuous rotation with mousedown/touchstart events
             let incrementInterval;
             incrementButton.addEventListener('mousedown', () => {
-                this.jointAnimator.adjustJointAngle(jointName, 2 * Math.PI / 180);
+                this.jointAnimator.adjustJointAngle(jointName, stepSizeRad);
+                this.updateJointAngleDisplay(jointName);
                 incrementInterval = setInterval(() => {
-                    this.jointAnimator.adjustJointAngle(jointName, 2 * Math.PI / 180);
+                    this.jointAnimator.adjustJointAngle(jointName, stepSizeRad);
+                    this.updateJointAngleDisplay(jointName);
                 }, 100); // Adjust every 100ms while button is held
             });
             
@@ -643,18 +666,139 @@ class URDFVisualizer {
             
             jointButtonsDiv.appendChild(incrementButton);
             
+            // Add reset button
+            const resetButton = document.createElement('button');
+            resetButton.className = 'reset';
+            resetButton.textContent = 'Reset';
+            resetButton.addEventListener('click', () => {
+                // Reset this specific joint
+                if (jointData.limit) {
+                    // Reset to middle of range if limits exist
+                    const midPosition = (jointData.limit.upper + jointData.limit.lower) / 2;
+                    this.urdfReader.setJointPosition(jointName, midPosition);
+                    this.jointAnimator.resetJoint(jointName, jointObject, jointData);
+                } else {
+                    // Reset to zero if no limits
+                    this.urdfReader.setJointPosition(jointName, 0);
+                    this.jointAnimator.resetJoint(jointName, jointObject, jointData);
+                }
+                this.updateJointAngleDisplay(jointName);
+            });
+            
+            jointButtonsDiv.appendChild(resetButton);
+            
             jointControlDiv.appendChild(jointButtonsDiv);
             
             // Add angle display
             const jointAngleDiv = document.createElement('div');
             jointAngleDiv.className = 'joint-angle';
             jointAngleDiv.id = `angle-${jointName}`;
-            jointAngleDiv.textContent = '0.00°';
+            
+            // Initialize with current angle
+            const currentAngle = this.urdfReader.getJointPosition(jointName) || 0;
+            jointAngleDiv.textContent = `${(currentAngle * 180 / Math.PI).toFixed(2)}°`;
+            
             jointControlDiv.appendChild(jointAngleDiv);
+            
+            // Add slider for joint control if limits are available
+            if (jointData.limit) {
+                const sliderContainer = document.createElement('div');
+                sliderContainer.className = 'slider-container';
+                
+                const slider = document.createElement('input');
+                slider.type = 'range';
+                slider.className = 'joint-slider';
+                slider.min = jointData.limit.lower * 180 / Math.PI;
+                slider.max = jointData.limit.upper * 180 / Math.PI;
+                slider.step = 0.1;
+                slider.value = currentAngle * 180 / Math.PI;
+                
+                slider.addEventListener('input', (event) => {
+                    const angleDeg = parseFloat(event.target.value);
+                    const angleRad = angleDeg * Math.PI / 180;
+                    this.urdfReader.setJointPosition(jointName, angleRad);
+                    this.jointAnimator.adjustJointAngle(jointName, 0); // Force update with current angle
+                    this.updateJointAngleDisplay(jointName);
+                });
+                
+                sliderContainer.appendChild(slider);
+                jointControlDiv.appendChild(sliderContainer);
+            }
             
             jointControlsContainer.appendChild(jointControlDiv);
         }
         
+        // Add global reset button
+        const globalResetDiv = document.createElement('div');
+        globalResetDiv.className = 'global-reset';
+        
+        const globalResetButton = document.createElement('button');
+        globalResetButton.textContent = 'Reset All Joints';
+        globalResetButton.addEventListener('click', () => {
+            this.urdfReader.resetJointPositions();
+            this.jointAnimator.resetJointAngles();
+            this.updateAllJointAngleDisplays();
+        });
+        
+        globalResetDiv.appendChild(globalResetButton);
+        jointControlsContainer.appendChild(globalResetDiv);
+        
         this.logger.info('Joint control buttons created');
+        
+        // Initialize all joint angle displays
+        this.updateAllJointAngleDisplays();
+    }
+    
+    /**
+     * Updates the display of a joint angle
+     * @param {string} jointName - The name of the joint
+     */
+    updateJointAngleDisplay(jointName) {
+        const angleDisplay = document.getElementById(`angle-${jointName}`);
+        if (angleDisplay) {
+            let currentAngle = 0;
+            
+            // Try to get the angle from the URDFReader first
+            try {
+                if (this.urdfReader && typeof this.urdfReader.getJointPosition === 'function') {
+                    const position = this.urdfReader.getJointPosition(jointName);
+                    if (position !== null) {
+                        currentAngle = position;
+                    }
+                } else if (this.jointAnimator) {
+                    // Fall back to the JointAnimator
+                    currentAngle = this.jointAnimator.getJointAngle(jointName);
+                }
+            } catch (error) {
+                this.logger.error(`Error getting joint angle for ${jointName}: ${error.message}`);
+                // Fall back to the JointAnimator
+                if (this.jointAnimator) {
+                    currentAngle = this.jointAnimator.getJointAngle(jointName);
+                }
+            }
+            
+            angleDisplay.textContent = `${(currentAngle * 180 / Math.PI).toFixed(2)}°`;
+            
+            // Update slider if it exists
+            try {
+                // Use querySelector with a more specific selector that doesn't rely on :has
+                const slider = document.querySelector(`#angle-${jointName}`).closest('.joint-control').querySelector('.joint-slider');
+                if (slider) {
+                    slider.value = currentAngle * 180 / Math.PI;
+                }
+            } catch (error) {
+                // Silently ignore errors with finding the slider
+                this.logger.debug(`Could not update slider for joint ${jointName}: ${error.message}`);
+            }
+        }
+    }
+    
+    /**
+     * Updates all joint angle displays
+     */
+    updateAllJointAngleDisplays() {
+        for (const jointName of this.jointObjects.keys()) {
+            this.updateJointAngleDisplay(jointName);
+        }
     }
 } 
