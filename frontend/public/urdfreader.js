@@ -1,131 +1,3 @@
-let camera, scene, renderer;
-let joints = [];
-let links = new Set();
-let robotStructure = {};
-
-// Camera rotation parameters
-let spherical = {
-    radius: 10,
-    phi: Math.PI / 4,    // vertical angle
-    theta: Math.PI / 4   // horizontal angle
-};
-
-// Mouse control variables
-let isDragging = false;
-let previousMousePosition = {
-    x: 0,
-    y: 0
-};
-
-// Initialize the 3D scene
-function init() {
-    // Scene
-    scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf3f4f6);
-
-    // Camera
-    camera = new THREE.PerspectiveCamera(
-        75,
-        window.innerWidth / window.innerHeight,
-        0.1,
-        1000
-    );
-    updateCameraPosition();
-
-    // Renderer
-    const container = document.getElementById('webgl-container');
-    renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(container.clientWidth, container.clientHeight);
-    container.appendChild(renderer.domElement);
-
-    // Grid
-    const grid = new THREE.GridHelper(20, 20, 0x000000, 0x888888);
-    scene.add(grid);
-
-    // Lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-    scene.add(ambientLight);
-
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight.position.set(5, 5, 5);
-    scene.add(directionalLight);
-
-    // Event Listeners
-    container.addEventListener('mousedown', onMouseDown);
-    container.addEventListener('mousemove', onMouseMove);
-    container.addEventListener('mouseup', onMouseUp);
-    container.addEventListener('mouseleave', onMouseUp);
-    container.addEventListener('wheel', onMouseWheel);
-    window.addEventListener('resize', onWindowResize);
-
-    animate();
-}
-
-// Camera control functions
-function updateCameraPosition() {
-    camera.position.x = spherical.radius * Math.sin(spherical.phi) * Math.cos(spherical.theta);
-    camera.position.y = spherical.radius * Math.cos(spherical.phi);
-    camera.position.z = spherical.radius * Math.sin(spherical.phi) * Math.sin(spherical.theta);
-    camera.lookAt(0, 0, 0);
-}
-
-function onMouseDown(event) {
-    isDragging = true;
-    const rect = event.target.getBoundingClientRect();
-    previousMousePosition = {
-        x: event.clientX - rect.left,
-        y: event.clientY - rect.top
-    };
-}
-
-function onMouseMove(event) {
-    if (!isDragging) return;
-
-    const rect = event.target.getBoundingClientRect();
-    const currentPosition = {
-        x: event.clientX - rect.left,
-        y: event.clientY - rect.top
-    };
-
-    const deltaMove = {
-        x: currentPosition.x - previousMousePosition.x,
-        y: currentPosition.y - previousMousePosition.y
-    };
-
-    const rotationSpeed = 0.01;
-    spherical.theta -= deltaMove.x * rotationSpeed;
-    spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi + deltaMove.y * rotationSpeed));
-
-    updateCameraPosition();
-    previousMousePosition = currentPosition;
-}
-
-function onMouseUp() {
-    isDragging = false;
-}
-
-function onMouseWheel(event) {
-    event.preventDefault();
-    const zoomSpeed = 0.1;
-    const minDistance = 2;
-    const maxDistance = 20;
-    const zoomDelta = event.deltaY * zoomSpeed;
-    spherical.radius = Math.max(minDistance, Math.min(maxDistance, spherical.radius + zoomDelta));
-    updateCameraPosition();
-}
-
-function onWindowResize() {
-    const container = document.getElementById('webgl-container');
-    camera.aspect = container.clientWidth / container.clientHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(container.clientWidth, container.clientHeight);
-}
-
-function animate() {
-    requestAnimationFrame(animate);
-    renderer.render(scene, camera);
-}
-
 class URDFReader {
     constructor() {
         this.robot = {
@@ -247,43 +119,61 @@ class URDFReader {
     }
 
     parseGeometry(geometryElement) {
-        if (!geometryElement) return null;
+        if (!geometryElement) {
+            console.log('No geometry element found');
+            return null;
+        }
 
         const geometry = {};
         const child = geometryElement.firstElementChild;
-        if (!child) return null;
+        if (!child) {
+            console.log('Geometry element has no children');
+            return null;
+        }
+
+        console.log('Parsing geometry of type:', child.tagName);
 
         switch (child.tagName) {
             case 'box':
                 geometry.type = 'box';
                 geometry.size = this.parseXYZ(child.getAttribute('size'));
+                console.log('Found box geometry:', geometry.size);
                 break;
             case 'cylinder':
                 geometry.type = 'cylinder';
                 geometry.radius = parseFloat(child.getAttribute('radius'));
                 geometry.length = parseFloat(child.getAttribute('length'));
+                console.log('Found cylinder geometry:', { radius: geometry.radius, length: geometry.length });
                 break;
             case 'sphere':
                 geometry.type = 'sphere';
                 geometry.radius = parseFloat(child.getAttribute('radius'));
+                console.log('Found sphere geometry:', { radius: geometry.radius });
                 break;
             case 'mesh':
                 const fullPath = child.getAttribute('filename');
-                // Only process STL files
-                if (fullPath.toLowerCase().endsWith('.stl')) {
+                console.log('Found mesh with path:', fullPath);
+                
+                // Handle both DAE and STL files
+                if (fullPath.toLowerCase().endsWith('.dae') || fullPath.toLowerCase().endsWith('.stl')) {
                     geometry.type = 'mesh';
-                    // Extract just the filename after the last slash
-                    geometry.filename = fullPath.split('/').pop();
-                    console.log('Found STL file:', geometry.filename);
+                    // Extract just the filename from the package:// path
+                    const filename = fullPath.split('/').pop();
+                    geometry.filename = filename;
+                    console.log('Processing mesh file:', filename);
+                    
                     if (child.getAttribute('scale')) {
                         geometry.scale = this.parseXYZ(child.getAttribute('scale'));
+                        console.log('Mesh scale:', geometry.scale);
                     }
                 } else {
-                    // Skip non-STL files
-                    console.log('Skipping non-STL mesh:', fullPath);
+                    console.log('Unsupported mesh format:', fullPath);
                     return null;
                 }
                 break;
+            default:
+                console.log('Unknown geometry type:', child.tagName);
+                return null;
         }
         return geometry;
     }
@@ -497,7 +387,4 @@ class URDFReader {
 
         return output;
     }
-}
-
-// Initialize Three.js scene
-init(); 
+} 

@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STL Viewer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+            height: calc(100vh - 40px);
+        }
+        .controls {
+            flex: 0 0 300px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+        }
+        #webgl-container {
+            flex: 1;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        select {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 10px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            opacity: 0.9;
+        }
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        #loadingStatus {
+            margin-top: 10px;
+            color: #666;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <h2>STL Viewer</h2>
+            <div>
+                <label for="modelSelect">Select STL File:</label>
+                <select id="modelSelect">
+                    <option value="">Loading STL files...</option>
+                </select>
+            </div>
+            <button id="loadButton">Load Model</button>
+            <div id="loadingStatus"></div>
+        </div>
+        <div id="webgl-container"></div>
+    </div>
+
+    <script>
+        class STLVisualizer {
+            constructor() {
+                this.scene = null;
+                this.camera = null;
+                this.renderer = null;
+                this.model = null;
+                this.stlLoader = new THREE.STLLoader();
+                
+                this.spherical = {
+                    radius: 10,
+                    phi: Math.PI / 4,
+                    theta: Math.PI / 4
+                };
+
+                this.isDragging = false;
+                this.previousMousePosition = { x: 0, y: 0 };
+
+                this.init();
+                this.setupEventListeners();
+                this.loadAvailableModels();
+                this.animate();
+            }
+
+            async loadAvailableModels() {
+                try {
+                    const timestamp = new Date().getTime();
+                    const response = await fetch(`/api/models?stl=true&t=${timestamp}`);
+                    const models = await response.json();
+                    const select = document.getElementById('modelSelect');
+                    select.innerHTML = '<option value="">Select a model...</option>';
+                    models.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model.urdf;  // The server still uses 'urdf' as the key
+                        option.textContent = model.name;
+                        select.appendChild(option);
+                    });
+                } catch (error) {
+                    console.error('Error loading models:', error);
+                    document.getElementById('loadingStatus').textContent = 'Error loading models list';
+                }
+            }
+
+            async loadSelectedModel() {
+                const modelFile = document.getElementById('modelSelect').value;
+                if (!modelFile) {
+                    alert('Please select a model first');
+                    return;
+                }
+
+                const loadingStatus = document.getElementById('loadingStatus');
+                const loadButton = document.getElementById('loadButton');
+                
+                try {
+                    loadingStatus.textContent = 'Loading STL...';
+                    loadButton.disabled = true;
+
+                    // Clear previous model if any
+                    if (this.model) {
+                        this.scene.remove(this.model);
+                        this.model = null;
+                    }
+
+                    // Load the STL file
+                    this.stlLoader.load(
+                        `/public/models/${modelFile}?t=${Date.now()}`,
+                        (geometry) => {
+                            const material = new THREE.MeshPhongMaterial({
+                                color: 0x808080,
+                                shininess: 30,
+                                specular: 0x111111
+                            });
+                            const mesh = new THREE.Mesh(geometry, material);
+
+                            // Center the geometry
+                            geometry.computeBoundingBox();
+                            const center = new THREE.Vector3();
+                            geometry.boundingBox.getCenter(center);
+                            geometry.center();
+
+                            // Scale the model to fit the view
+                            const box = new THREE.Box3().setFromObject(mesh);
+                            const size = box.getSize(new THREE.Vector3());
+                            const maxDim = Math.max(size.x, size.y, size.z);
+                            const scale = 5 / maxDim;
+                            mesh.scale.multiplyScalar(scale);
+
+                            this.model = mesh;
+                            this.scene.add(this.model);
+                            loadingStatus.textContent = 'Model loaded successfully';
+                        },
+                        undefined,
+                        (error) => {
+                            console.error('Error loading STL:', error);
+                            loadingStatus.textContent = 'Error loading model: ' + error.message;
+                        }
+                    );
+                } catch (error) {
+                    console.error('Error:', error);
+                    loadingStatus.textContent = 'Error loading model: ' + error.message;
+                } finally {
+                    loadButton.disabled = false;
+                }
+            }
+
+            init() {
+                // Scene
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0xf3f4f6);
+
+                // Camera
+                this.camera = new THREE.PerspectiveCamera(
+                    75,
+                    window.innerWidth / window.innerHeight,
+                    0.1,
+                    1000
+                );
+                this.updateCameraPosition();
+
+                // Renderer
+                const container = document.getElementById('webgl-container');
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                this.renderer.setSize(container.clientWidth, container.clientHeight);
+                container.appendChild(this.renderer.domElement);
+
+                // Grid
+                const grid = new THREE.GridHelper(20, 20, 0x000000, 0x888888);
+                grid.rotation.x = Math.PI / 2;
+                this.scene.add(grid);
+
+                // Axes helper
+                const axesHelper = new THREE.AxesHelper(5);
+                this.scene.add(axesHelper);
+
+                // Lights
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+                this.scene.add(ambientLight);
+
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(5, 5, 5);
+                this.scene.add(directionalLight);
+            }
+
+            setupEventListeners() {
+                const container = document.getElementById('webgl-container');
+                container.addEventListener('mousedown', this.onMouseDown.bind(this));
+                container.addEventListener('mousemove', this.onMouseMove.bind(this));
+                container.addEventListener('mouseup', this.onMouseUp.bind(this));
+                container.addEventListener('mouseleave', this.onMouseUp.bind(this));
+                container.addEventListener('wheel', this.onMouseWheel.bind(this));
+                window.addEventListener('resize', this.onWindowResize.bind(this));
+            }
+
+            updateCameraPosition() {
+                this.camera.position.x = this.spherical.radius * Math.sin(this.spherical.phi) * Math.cos(this.spherical.theta);
+                this.camera.position.z = this.spherical.radius * Math.cos(this.spherical.phi);
+                this.camera.position.y = this.spherical.radius * Math.sin(this.spherical.phi) * Math.sin(this.spherical.theta);
+                this.camera.up.set(0, 0, 1);
+                this.camera.lookAt(0, 0, 0);
+            }
+
+            onMouseDown(event) {
+                this.isDragging = true;
+                const rect = event.target.getBoundingClientRect();
+                this.previousMousePosition = {
+                    x: event.clientX - rect.left,
+                    y: event.clientY - rect.top
+                };
+            }
+
+            onMouseMove(event) {
+                if (!this.isDragging) return;
+
+                const rect = event.target.getBoundingClientRect();
+                const currentPosition = {
+                    x: event.clientX - rect.left,
+                    y: event.clientY - rect.top
+                };
+
+                const deltaMove = {
+                    x: currentPosition.x - this.previousMousePosition.x,
+                    y: currentPosition.y - this.previousMousePosition.y
+                };
+
+                const rotationSpeed = 0.01;
+                this.spherical.theta -= deltaMove.x * rotationSpeed;
+                this.spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, this.spherical.phi + deltaMove.y * rotationSpeed));
+
+                this.updateCameraPosition();
+                this.previousMousePosition = currentPosition;
+            }
+
+            onMouseUp() {
+                this.isDragging = false;
+            }
+
+            onMouseWheel(event) {
+                event.preventDefault();
+                const zoomSpeed = 0.1;
+                const minDistance = 2;
+                const maxDistance = 20;
+                const zoomDelta = event.deltaY * zoomSpeed;
+                this.spherical.radius = Math.max(minDistance, Math.min(maxDistance, this.spherical.radius + zoomDelta));
+                this.updateCameraPosition();
+            }
+
+            onWindowResize() {
+                const container = document.getElementById('webgl-container');
+                this.camera.aspect = container.clientWidth / container.clientHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(container.clientWidth, container.clientHeight);
+            }
+
+            animate() {
+                requestAnimationFrame(this.animate.bind(this));
+                this.renderer.render(this.scene, this.camera);
+            }
+        }
+
+        // Initialize the visualizer
+        const visualizer = new STLVisualizer();
+
+        // Setup event listeners
+        document.getElementById('loadButton').addEventListener('click', () => {
+            visualizer.loadSelectedModel();
+        });
+    </script>
+</body>
+</html> 

@@ -4,9 +4,49 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>URDF Viewer</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
-    <script src="urdfreader.js"></script>
+    <!-- Load Three.js and wait for it to be ready -->
+    <script src="https://unpkg.com/three@0.140.0/build/three.min.js"></script>
+    <script>
+        // Wait for Three.js to load
+        window.addEventListener('load', function() {
+            // Load additional scripts after Three.js is ready
+            function loadScript(src) {
+                return new Promise((resolve, reject) => {
+                    const script = document.createElement('script');
+                    script.src = src;
+                    script.onload = resolve;
+                    script.onerror = reject;
+                    document.head.appendChild(script);
+                });
+            }
+
+            Promise.all([
+                loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/STLLoader.js'),
+                loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/ColladaLoader.js'),
+                loadScript('urdfreader.js')
+            ]).then(() => {
+                // Initialize the viewer after all scripts are loaded
+                if (typeof THREE === 'undefined') {
+                    throw new Error('Three.js failed to load');
+                }
+                if (typeof THREE.STLLoader === 'undefined') {
+                    throw new Error('STLLoader failed to load');
+                }
+                if (typeof THREE.ColladaLoader === 'undefined') {
+                    throw new Error('ColladaLoader failed to load');
+                }
+                // Initialize the visualizer
+                window.visualizer = new URDFVisualizer();
+            }).catch(error => {
+                console.error('Error loading scripts:', error);
+                const debugConsole = document.getElementById('debugConsole');
+                if (debugConsole) {
+                    const timestamp = new Date().toLocaleTimeString();
+                    debugConsole.innerHTML = `<div><span class="timestamp">[${timestamp}]</span> <span class="error">Error loading required scripts: ${error.message}</span></div>`;
+                }
+            });
+        });
+    </script>
     <style>
         body {
             margin: 0;
@@ -21,15 +61,20 @@
         }
         .controls {
             flex: 0 0 300px;
+            min-width: 300px;
+            max-width: 300px;
             background: white;
             padding: 20px;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             display: flex;
             flex-direction: column;
+            overflow-y: auto;
+            max-height: calc(100vh - 80px);
         }
         #webgl-container {
             flex: 1;
+            min-width: 0;
             background: white;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
@@ -41,8 +86,11 @@
             background: #f8f8f8;
             border-radius: 4px;
             font-family: monospace;
-            white-space: pre;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
             overflow-y: auto;
+            max-height: 200px;
             flex-grow: 1;
         }
         select {
@@ -51,16 +99,18 @@
             margin-bottom: 10px;
             border: 1px solid #ddd;
             border-radius: 4px;
+            font-size: 14px;
         }
         button {
             background: #4CAF50;
             color: white;
-            padding: 10px 20px;
+            padding: 8px 16px;
             border: none;
             border-radius: 4px;
             cursor: pointer;
-            margin-top: 10px;
+            margin-top: 8px;
             transition: background-color 0.3s;
+            font-size: 14px;
         }
         button:hover {
             opacity: 0.9;
@@ -70,19 +120,65 @@
             cursor: not-allowed;
         }
         #loadingStatus {
-            margin-top: 10px;
+            margin-top: 8px;
             color: #666;
-            font-size: 0.9em;
+            font-size: 12px;
         }
         #meshStatus {
-            margin-top: 10px;
-            padding: 10px;
+            margin-top: 8px;
+            padding: 8px;
             background: #f8f8f8;
             border-radius: 4px;
             font-family: monospace;
-            white-space: pre;
+            font-size: 11px;
+            white-space: pre-wrap;
+            word-break: break-all;
             overflow-y: auto;
-            max-height: 150px;
+            max-height: 100px;
+        }
+        #debugConsole {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 150px;
+            background: rgba(30, 30, 30, 0.95);
+            color: #00ff00;
+            font-family: monospace;
+            font-size: 11px;
+            padding: 8px;
+            overflow-y: auto;
+            z-index: 1000;
+            border-top: 2px solid #333;
+            display: block !important;
+            visibility: visible !important;
+        }
+        #debugConsole .timestamp {
+            color: #888;
+            margin-right: 8px;
+            font-size: 10px;
+        }
+        #debugConsole .error {
+            color: #ff4444;
+            font-weight: bold;
+        }
+        #debugConsole .warning {
+            color: #ffaa00;
+            font-weight: bold;
+        }
+        #debugConsole .success {
+            color: #44ff44;
+            font-weight: bold;
+        }
+        #debugConsole .info {
+            color: #00ff00;
+        }
+        h2 {
+            margin: 0 0 16px 0;
+            font-size: 18px;
+        }
+        .controls > div {
+            margin-bottom: 12px;
         }
     </style>
 </head>
@@ -107,10 +203,44 @@
         </div>
         <div id="webgl-container"></div>
     </div>
+    <div id="debugConsole"></div>
 
     <script>
+        // Add debug logging functionality
+        class DebugLogger {
+            constructor() {
+                this.console = document.getElementById('debugConsole');
+                if (!this.console) {
+                    console.error('Debug console element not found!');
+                    throw new Error('Debug console element not found');
+                }
+                this.log('Debug console initialized', 'success');
+            }
+
+            log(message, type = 'info') {
+                if (!this.console) {
+                    console.error('Cannot log, debug console not found:', message);
+                    return;
+                }
+                const timestamp = new Date().toLocaleTimeString();
+                const entry = document.createElement('div');
+                entry.innerHTML = `<span class="timestamp">[${timestamp}]</span> <span class="${type}">${message}</span>`;
+                this.console.appendChild(entry);
+                this.console.scrollTop = this.console.scrollHeight;
+                // Also log to browser console
+                console.log(`[${type}] ${message}`);
+            }
+
+            info(message) { this.log(message, 'info'); }
+            success(message) { this.log(message, 'success'); }
+            warning(message) { this.log(message, 'warning'); }
+            error(message) { this.log(message, 'error'); }
+            clear() { this.console.innerHTML = ''; }
+        }
+
         class URDFVisualizer {
             constructor() {
+                this.logger = new DebugLogger();
                 this.scene = null;
                 this.camera = null;
                 this.renderer = null;
@@ -122,7 +252,14 @@
                 this.animationTime = 0;
                 this.animationDuration = 2;
                 this.jointAngles = new Map();
+
+                // Initialize loaders after Three.js is loaded
                 this.stlLoader = new THREE.STLLoader();
+                this.colladaLoader = new THREE.ColladaLoader();
+                // Set ColladaLoader options after initialization
+                if (this.colladaLoader) {
+                    this.colladaLoader.options = { convertUpAxis: true };
+                }
                 
                 this.spherical = {
                     radius: 10,
@@ -137,59 +274,6 @@
                 this.setupEventListeners();
                 this.loadAvailableModels();
                 this.animate();
-            }
-
-            async loadAvailableModels() {
-                try {
-                    const timestamp = new Date().getTime();
-                    const response = await fetch(`/api/models?t=${timestamp}`);
-                    const models = await response.json();
-                    const select = document.getElementById('modelSelect');
-                    select.innerHTML = '<option value="">Select a model...</option>';
-                    models.forEach(model => {
-                        const option = document.createElement('option');
-                        option.value = model.urdf;  // Just the filename
-                        option.textContent = model.name;
-                        select.appendChild(option);
-                    });
-                } catch (error) {
-                    console.error('Error loading models:', error);
-                    document.getElementById('loadingStatus').textContent = 'Error loading models list';
-                }
-            }
-
-            async loadSelectedModel() {
-                const modelFile = document.getElementById('modelSelect').value;
-                if (!modelFile) {
-                    alert('Please select a model first');
-                    return;
-                }
-
-                const loadingStatus = document.getElementById('loadingStatus');
-                const meshStatus = document.getElementById('meshStatus');
-                const loadButton = document.getElementById('loadButton');
-                
-                try {
-                    loadingStatus.textContent = 'Loading URDF...';
-                    loadButton.disabled = true;
-                    meshStatus.textContent = '';
-
-                    // Load and parse the URDF
-                    const robotData = await this.urdfReader.loadModelFromFile(modelFile);
-                    
-                    // Display the tree structure
-                    document.getElementById('treeStructure').textContent = this.urdfReader.displayTreeStructure();
-                    
-                    // Visualize the robot
-                    this.visualizeRobot(robotData);
-
-                    loadingStatus.textContent = 'Model loaded successfully';
-                } catch (error) {
-                    console.error('Error:', error);
-                    loadingStatus.textContent = 'Error loading model: ' + error.message;
-                } finally {
-                    loadButton.disabled = false;
-                }
             }
 
             init() {
@@ -233,24 +317,18 @@
                 this.robotGroup = new THREE.Group();
                 this.scene.add(this.robotGroup);
 
-                // Add animation controls
-                const controls = document.querySelector('.controls');
-                const animationControls = document.createElement('div');
-                animationControls.style.marginTop = '20px';
-                animationControls.innerHTML = `
-                    <button id="animateButton" style="background: #2196F3;">Animate Joints</button>
-                    <div id="animationStatus"></div>
-                `;
-                controls.appendChild(animationControls);
+                // Add load button event listener
+                const loadButton = document.getElementById('loadButton');
+                if (loadButton) {
+                    loadButton.addEventListener('click', () => this.loadSelectedModel());
+                    this.logger.info('Load button event listener added');
+                } else {
+                    this.logger.error('Load button not found in DOM');
+                }
 
-                // Add animation button event listener
-                document.getElementById('animateButton').addEventListener('click', () => {
-                    if (!this.isAnimating) {
-                        this.startAnimation();
-                    } else {
-                        this.stopAnimation();
-                    }
-                });
+                this.setupEventListeners();
+                this.loadAvailableModels();
+                this.animate();
             }
 
             setupEventListeners() {
@@ -429,88 +507,103 @@
                 }
             }
 
-            createGeometry(geometryData) {
-                if (!geometryData) return null;
+            loadMesh(filename) {
+                return new Promise((resolve, reject) => {
+                    const placeholder = new THREE.BoxGeometry(0.1, 0.1, 0.1);
+                    const material = new THREE.MeshPhongMaterial({ color: 0x808080 });
+                    const mesh = new THREE.Mesh(placeholder, material);
 
-                switch (geometryData.type) {
-                    case 'box':
-                        return new THREE.BoxGeometry(
-                            geometryData.size[0],
-                            geometryData.size[1],
-                            geometryData.size[2]
-                        );
-                    case 'cylinder':
-                        const geometry = new THREE.CylinderGeometry(
-                            geometryData.radius,
-                            geometryData.radius,
-                            geometryData.length,
-                            32
-                        );
-                        return geometry;
-                    case 'sphere':
-                        return new THREE.SphereGeometry(geometryData.radius, 32, 32);
-                    case 'mesh':
-                        // Handle mesh loading
-                        if (geometryData.filename) {
-                            const mesh = this.loadSTLMesh(geometryData.filename);
-                            if (mesh) {
-                                // Apply mesh scale if specified
-                                if (geometryData.scale) {
-                                    mesh.scale.set(
-                                        geometryData.scale[0],
-                                        geometryData.scale[1],
-                                        geometryData.scale[2]
-                                    );
+                    const meshPath = `/public/models/meshes/${filename}`;
+                    const timestamp = new Date().getTime();
+                    this.logger.info(`Loading mesh file: ${filename}`);
+                    this.logger.info(`Resolved path: ${meshPath}`);
+
+                    if (filename.toLowerCase().endsWith('.stl')) {
+                        this.stlLoader.load(
+                            `${meshPath}?t=${timestamp}`,
+                            (geometry) => {
+                                geometry.computeBoundingBox();
+                                const center = new THREE.Vector3();
+                                geometry.boundingBox.getCenter(center);
+                                geometry.center();
+                                
+                                mesh.geometry = geometry;
+                                mesh.material = new THREE.MeshPhongMaterial({ 
+                                    color: 0x808080,
+                                    shininess: 30,
+                                    specular: 0x111111
+                                });
+                                this.logger.success(`Successfully loaded STL: ${filename}`);
+                                resolve(mesh);
+                            },
+                            (progress) => {
+                                if (progress.lengthComputable) {
+                                    const percentComplete = (progress.loaded / progress.total) * 100;
+                                    this.logger.info(`Loading ${filename}: ${Math.round(percentComplete)}%`);
                                 }
-                                return mesh;
+                            },
+                            (error) => {
+                                this.logger.error(`Failed to load STL: ${filename}`);
+                                this.logger.error(`Error details: ${error.message}`);
+                                reject(error);
                             }
-                        }
-                        return new THREE.BoxGeometry(0.1, 0.1, 0.1);
-                    default:
-                        return new THREE.BoxGeometry(0.1, 0.1, 0.1);
-                }
-            }
-
-            loadSTLMesh(filename) {
-                // Create a placeholder geometry while loading
-                const placeholder = new THREE.BoxGeometry(0.1, 0.1, 0.1);
-                const material = new THREE.MeshPhongMaterial({ color: 0x808080 });
-                const mesh = new THREE.Mesh(placeholder, material);
-
-                // Load the actual STL file
-                const timestamp = new Date().getTime();
-                this.stlLoader.load(
-                    `/models/${filename}?t=${timestamp}`,
-                    (geometry) => {
-                        mesh.geometry = geometry;
-                        mesh.material = material;
-                    },
-                    undefined,
-                    (error) => {
-                        console.error('Error loading STL:', error);
+                        );
+                    } else if (filename.toLowerCase().endsWith('.dae')) {
+                        this.colladaLoader.load(
+                            `${meshPath}?t=${timestamp}`,
+                            (collada) => {
+                                try {
+                                    const daeScene = collada.scene;
+                                    this.logger.info(`DAE scene loaded for ${filename}`);
+                                    
+                                    // Apply materials and process meshes
+                                    daeScene.traverse((child) => {
+                                        if (child instanceof THREE.Mesh) {
+                                            child.material = new THREE.MeshPhongMaterial({ 
+                                                color: 0x808080,
+                                                shininess: 30,
+                                                specular: 0x111111
+                                            });
+                                            // Ensure geometry is properly initialized
+                                            if (child.geometry) {
+                                                child.geometry.computeBoundingBox();
+                                                child.geometry.computeVertexNormals();
+                                            }
+                                        }
+                                    });
+                                    
+                                    // Center the model
+                                    const box = new THREE.Box3().setFromObject(daeScene);
+                                    const center = box.getCenter(new THREE.Vector3());
+                                    daeScene.position.sub(center);
+                                    
+                                    this.logger.success(`Successfully loaded DAE: ${filename}`);
+                                    resolve(daeScene);
+                                } catch (error) {
+                                    this.logger.error(`Error processing DAE scene for ${filename}: ${error.message}`);
+                                    reject(error);
+                                }
+                            },
+                            (progress) => {
+                                if (progress.lengthComputable) {
+                                    const percentComplete = (progress.loaded / progress.total) * 100;
+                                    this.logger.info(`Loading ${filename}: ${Math.round(percentComplete)}%`);
+                                }
+                            },
+                            (error) => {
+                                this.logger.error(`Failed to load DAE: ${filename}`);
+                                this.logger.error(`Error details: ${error.message}`);
+                                reject(error);
+                            }
+                        );
+                    } else {
+                        reject(new Error(`Unsupported file format: ${filename}`));
                     }
-                );
-
-                return mesh;
-            }
-
-            createMaterial(materialData) {
-                if (!materialData) {
-                    return new THREE.MeshPhongMaterial({ color: 0x808080 });
-                }
-
-                const color = materialData.color ? 
-                    new THREE.Color(materialData.color[0], materialData.color[1], materialData.color[2]) :
-                    new THREE.Color(0x808080);
-
-                return new THREE.MeshPhongMaterial({ 
-                    color: color,
-                    opacity: materialData.color ? materialData.color[3] : 1,
-                    transparent: materialData.color ? materialData.color[3] < 1 : false
                 });
             }
 
-            visualizeRobot(robotData) {
+            async visualizeRobot(robotData) {
+                this.logger.info('Starting robot visualization...');
                 this.clearRobot();
                 this.jointObjects.clear();
                 
@@ -520,89 +613,105 @@
 
                 // Create visual objects for each link
                 for (const [linkName, linkData] of robotData.links) {
+                    this.logger.info(`Processing link: ${linkName}`);
                     const linkGroup = new THREE.Group();
                     linkGroup.name = linkName;
 
                     if (linkData.visual) {
-                        if (linkData.visual.geometry && linkData.visual.geometry.type === 'mesh') {
-                            const filename = linkData.visual.geometry.filename;
-                            // Only process STL files
-                            if (filename.toLowerCase().endsWith('.stl')) {
-                                meshStatus.textContent += `Loading ${filename}...\n`;
+                        this.logger.info(`Link ${linkName} has visual data`);
+                        if (linkData.visual.geometry) {
+                            this.logger.info(`Link ${linkName} geometry type: ${linkData.visual.geometry.type}`);
+                            if (linkData.visual.geometry.type === 'mesh') {
+                                const filename = linkData.visual.geometry.filename;
+                                this.logger.info(`Link ${linkName} has mesh: ${filename}`);
                                 
-                                this.stlLoader.load(
-                                    `/public/models/${filename}?t=${Date.now()}`,
-                                    (geometry) => {
-                                        const material = new THREE.MeshPhongMaterial({ 
-                                            color: 0x808080,
-                                            shininess: 30,
-                                            specular: 0x111111
-                                        });
-                                        const mesh = new THREE.Mesh(geometry, material);
-
-                                        // Apply visual origin transform
-                                        if (linkData.visual.origin) {
-                                            const xyz = linkData.visual.origin.xyz;
-                                            const rpy = linkData.visual.origin.rpy;
-                                            mesh.position.set(xyz[0], xyz[1], xyz[2]);
-                                            mesh.rotation.set(rpy[0], rpy[1], rpy[2]);
-                                        }
-
-                                        // Apply scale if specified
-                                        if (linkData.visual.geometry.scale) {
-                                            const scale = linkData.visual.geometry.scale;
-                                            mesh.scale.set(scale[0], scale[1], scale[2]);
-                                        }
-
-                                        linkGroup.add(mesh);
-                                        meshStatus.textContent += `✓ Loaded ${filename}\n`;
-                                    },
-                                    undefined,
-                                    (error) => {
-                                        console.error('Error loading STL:', error);
-                                        meshStatus.textContent += `✗ Failed to load ${filename}\n`;
+                                meshStatus.textContent += `Loading ${filename}...\n`;
+                                this.logger.info(`Attempting to load mesh for ${linkName}: ${filename}`);
+                                
+                                try {
+                                    const mesh = await this.loadMesh(filename);
+                                    
+                                    if (linkData.visual.origin) {
+                                        const xyz = linkData.visual.origin.xyz || [0, 0, 0];
+                                        const rpy = linkData.visual.origin.rpy || [0, 0, 0];
+                                        mesh.position.set(xyz[0], xyz[1], xyz[2]);
+                                        mesh.rotation.set(rpy[0], rpy[1], rpy[2]);
+                                        this.logger.info(`Applied transform to ${linkName}: pos=[${xyz.join(',')}], rot=[${rpy.join(',')}]`);
                                     }
-                                );
+
+                                    if (linkData.visual.geometry.scale) {
+                                        const scale = linkData.visual.geometry.scale;
+                                        mesh.scale.set(scale[0], scale[1], scale[2]);
+                                        this.logger.info(`Applied scale to ${linkName}: [${scale.join(',')}]`);
+                                    }
+
+                                    linkGroup.add(mesh);
+                                    meshStatus.textContent += `Added ${filename} to link ${linkName}\n`;
+                                    this.logger.success(`Successfully added mesh to link: ${linkName}`);
+                                } catch (error) {
+                                    meshStatus.textContent += `Failed to load ${filename}: ${error}\n`;
+                                    this.logger.error(`Failed to load mesh for link ${linkName}: ${error.message}`);
+                                    // Create a placeholder geometry for failed loads
+                                    const placeholder = new THREE.BoxGeometry(0.1, 0.1, 0.1);
+                                    const material = new THREE.MeshPhongMaterial({ color: 0xff0000 });
+                                    const placeholderMesh = new THREE.Mesh(placeholder, material);
+                                    linkGroup.add(placeholderMesh);
+                                    this.logger.warning(`Added placeholder geometry for ${linkName}`);
+                                }
                             } else {
-                                meshStatus.textContent += `Skipping non-STL file: ${filename}\n`;
+                                this.logger.info(`Link ${linkName} using primitive geometry: ${linkData.visual.geometry.type}`);
                             }
+                        } else {
+                            this.logger.warning(`Link ${linkName} has visual data but no geometry`);
                         }
+                    } else {
+                        this.logger.warning(`Link ${linkName} has no visual data`);
                     }
 
                     linkObjects.set(linkName, linkGroup);
                 }
 
+                this.logger.info('Building joint structure...');
                 // Build the tree structure
                 for (const [jointName, jointData] of robotData.joints) {
                     const parentLink = linkObjects.get(jointData.parent);
                     const childLink = linkObjects.get(jointData.child);
 
                     if (parentLink && childLink) {
-                        // Create a joint group for animation
+                        this.logger.info(`Processing joint: ${jointName} (${jointData.parent} -> ${jointData.child})`);
                         const jointGroup = new THREE.Group();
                         jointGroup.name = jointName;
                         
-                        // Apply joint transform
                         if (jointData.origin) {
-                            const xyz = jointData.origin.xyz;
-                            const rpy = jointData.origin.rpy;
-                            childLink.position.set(xyz[0], xyz[1], xyz[2]);
-                            childLink.rotation.set(rpy[0], rpy[1], rpy[2]);
+                            const xyz = jointData.origin.xyz || [0, 0, 0];
+                            const rpy = jointData.origin.rpy || [0, 0, 0];
+                            jointGroup.position.set(xyz[0], xyz[1], xyz[2]);
+                            jointGroup.rotation.set(rpy[0], rpy[1], rpy[2]);
+                            this.logger.info(`Applied joint transform: pos=[${xyz.join(',')}], rot=[${rpy.join(',')}]`);
                         }
 
                         jointGroup.add(childLink);
                         parentLink.add(jointGroup);
-                        
-                        // Store joint object for animation
                         this.jointObjects.set(jointName, jointGroup);
+
+                        const jointAxis = jointData.axis || [1, 0, 0];
+                        const axisHelper = new THREE.ArrowHelper(
+                            new THREE.Vector3(jointAxis[0], jointAxis[1], jointAxis[2]),
+                            new THREE.Vector3(0, 0, 0),
+                            0.5,
+                            0xff0000
+                        );
+                        jointGroup.add(axisHelper);
+                        this.logger.info(`Added joint axis indicator for ${jointName}: [${jointAxis.join(',')}]`);
                     }
                 }
 
-                // Add root links to the scene
+                this.logger.info('Adding root links to scene...');
                 for (const rootLink of robotData.rootLinks) {
                     const rootObject = linkObjects.get(rootLink);
                     if (rootObject) {
                         this.robotGroup.add(rootObject);
+                        this.logger.success(`Added root link: ${rootLink}`);
                     }
                 }
 
@@ -615,24 +724,122 @@
                 
                 this.robotGroup.position.copy(center).multiplyScalar(-1);
                 this.robotGroup.scale.multiplyScalar(scale);
+                this.logger.info(`Centered and scaled robot: scale=${scale}, center=[${center.x.toFixed(3)},${center.y.toFixed(3)},${center.z.toFixed(3)}]`);
+
+                this.camera.position.set(5, 5, 5);
+                this.camera.lookAt(this.robotGroup.position);
+                this.logger.success('Robot visualization completed');
+            }
+
+            async loadAvailableModels() {
+                try {
+                    this.logger.info('Starting to load URDF models from server...');
+                    const timestamp = new Date().getTime();
+                    const url = `/api/models?t=${timestamp}`;
+                    this.logger.info(`Fetching models from: ${url}`);
+                    
+                    const response = await fetch(url);
+                    this.logger.info(`Server response status: ${response.status} ${response.statusText}`);
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    
+                    const text = await response.text();
+                    this.logger.info(`Raw server response: ${text}`);
+                    
+                    if (!text) {
+                        throw new Error('Empty response from server');
+                    }
+                    
+                    const models = JSON.parse(text);
+                    this.logger.success(`Found ${models.length} URDF models on server`);
+                    
+                    const select = document.getElementById('modelSelect');
+                    if (!select) {
+                        throw new Error('Could not find modelSelect element in DOM');
+                    }
+                    
+                    select.innerHTML = '<option value="">Select a model...</option>';
+                    
+                    if (!Array.isArray(models) || models.length === 0) {
+                        this.logger.warning('No URDF models found on server');
+                        select.innerHTML = '<option value="">No models available</option>';
+                        return;
+                    }
+                    
+                    models.forEach(model => {
+                        if (!model.name || !model.urdf) {
+                            this.logger.warning(`Invalid model data received: ${JSON.stringify(model)}`);
+                            return;
+                        }
+                        const option = document.createElement('option');
+                        option.value = model.urdf;
+                        option.textContent = model.name;
+                        select.appendChild(option);
+                        this.logger.info(`Added model to dropdown: ${model.name}`);
+                    });
+                    
+                    this.logger.success(`Successfully populated dropdown with ${models.length} URDF models`);
+                } catch (error) {
+                    this.logger.error(`Failed to load models from server: ${error.message}`);
+                    const select = document.getElementById('modelSelect');
+                    if (select) {
+                        select.innerHTML = '<option value="">Error loading models</option>';
+                    }
+                }
+            }
+
+            async loadSelectedModel() {
+                const modelSelect = document.getElementById('modelSelect');
+                const modelFile = modelSelect ? modelSelect.value : '';
+                
+                if (!modelFile) {
+                    this.logger.warning('No model selected in dropdown');
+                    alert('Please select a model first');
+                    return;
+                }
+
+                const loadingStatus = document.getElementById('loadingStatus');
+                const meshStatus = document.getElementById('meshStatus');
+                const loadButton = document.getElementById('loadButton');
+                
+                try {
+                    this.logger.info(`Starting to load URDF model: ${modelFile}`);
+                    loadingStatus.textContent = 'Loading URDF...';
+                    loadButton.disabled = true;
+                    meshStatus.textContent = '';
+
+                    // Clear existing robot
+                    this.clearRobot();
+
+                    // Load and parse the URDF
+                    this.logger.info('Requesting URDF file from server...');
+                    const robotData = await this.urdfReader.loadModelFromFile(modelFile);
+                    this.logger.success(`Successfully parsed URDF for robot: ${robotData.name}`);
+                    this.logger.info(`Robot has ${robotData.links.size} links and ${robotData.joints.size} joints`);
+                    
+                    // Display the tree structure
+                    this.logger.info('Generating robot tree structure...');
+                    document.getElementById('treeStructure').textContent = this.urdfReader.displayTreeStructure();
+                    this.logger.success('Robot tree structure generated');
+                    
+                    // Visualize the robot
+                    this.logger.info('Starting robot visualization...');
+                    await this.visualizeRobot(robotData);
+
+                    loadingStatus.textContent = 'Model loaded successfully';
+                    this.logger.success('Robot model fully loaded and visualized');
+                } catch (error) {
+                    console.error('Error:', error);
+                    this.logger.error(`Failed to load model: ${error.message}`);
+                    this.logger.error('Stack trace: ' + error.stack);
+                    loadingStatus.textContent = 'Error loading model: ' + error.message;
+                } finally {
+                    loadButton.disabled = false;
+                }
             }
         }
-
-        // Initialize the visualizer
-        const visualizer = new URDFVisualizer();
-
-        // Setup event listeners
-        document.getElementById('loadButton').addEventListener('click', () => {
-            visualizer.loadSelectedModel();
-        });
-
-        document.getElementById('animateButton').addEventListener('click', () => {
-            if (!visualizer.isAnimating) {
-                visualizer.startAnimation();
-            } else {
-                visualizer.stopAnimation();
-            }
-        });
     </script>
 </body>
 </html> 
