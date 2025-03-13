@@ -352,8 +352,14 @@
                 container.appendChild(this.renderer.domElement);
 
                 // Grid - XY plane since Z is up
-                const grid = new THREE.GridHelper(20, 20, 0x000000, 0x888888);
-                grid.rotation.x = Math.PI / 2; // Rotate grid to XY plane
+                const gridSize = 10; // Consistent grid size
+                const gridDivisions = 10; // Consistent grid divisions
+                const gridColorCenter = 0x444444; // Darker color for center lines
+                const gridColor = 0x888888; // Lighter color for grid lines
+
+                // Create single XY plane grid (horizontal)
+                const grid = new THREE.GridHelper(gridSize, gridDivisions, gridColorCenter, gridColor);
+                grid.rotation.x = Math.PI / 2; // Rotate to lie on XY plane
                 this.scene.add(grid);
 
                 // Add coordinate axes helper
@@ -371,6 +377,9 @@
                 // Robot group
                 this.robotGroup = new THREE.Group();
                 this.scene.add(this.robotGroup);
+
+                // Cube object (will be created when button is clicked)
+                this.cube = null;
 
                 // Add load button event listener
                 const loadButton = document.getElementById('loadButton');
@@ -408,6 +417,32 @@
                     this.logger.info('Animation button event listener added');
                 } else {
                     this.logger.error('Animation button not found in DOM');
+                }
+
+                // Add cube button event listeners
+                const drawCubeButton = document.getElementById('drawCubeButton');
+                const removeCubeButton = document.getElementById('removeCubeButton');
+                
+                if (drawCubeButton) {
+                    drawCubeButton.addEventListener('click', () => {
+                        this.drawCube();
+                        drawCubeButton.style.display = 'none';
+                        removeCubeButton.style.display = 'block';
+                    });
+                    this.logger.info('Draw cube button event listener added');
+                } else {
+                    this.logger.error('Draw cube button not found in DOM');
+                }
+                
+                if (removeCubeButton) {
+                    removeCubeButton.addEventListener('click', () => {
+                        this.removeCube();
+                        removeCubeButton.style.display = 'none';
+                        drawCubeButton.style.display = 'block';
+                    });
+                    this.logger.info('Remove cube button event listener added');
+                } else {
+                    this.logger.error('Remove cube button not found in DOM');
                 }
             }
 
@@ -644,13 +679,21 @@
                                 geometry.boundingBox.getCenter(center);
                                 geometry.center();
                                 
+                                // Fix for STL files - ensure proper orientation and scale
+                                // STL files often use a different coordinate system than URDF expects
                                 mesh.geometry = geometry;
+                                
+                                // Apply a rotation to correct the orientation
+                                // This rotates from STL's coordinate system to match the URDF/DAE coordinate system
+                                mesh.rotation.set(-Math.PI/2, 0, 0);
+                                
                                 mesh.material = new THREE.MeshPhongMaterial({ 
                                     color: 0x808080,
                                     shininess: 30,
                                     specular: 0x111111
                                 });
-                                this.logger.success(`Successfully loaded STL: ${filename}`);
+                                
+                                this.logger.success(`Successfully loaded STL: ${filename} with coordinate system correction`);
                                 resolve(mesh);
                             },
                             (progress) => {
@@ -751,8 +794,25 @@
                                     if (linkData.visual.origin) {
                                         const xyz = linkData.visual.origin.xyz || [0, 0, 0];
                                         const rpy = linkData.visual.origin.rpy || [0, 0, 0];
-                                        mesh.position.set(xyz[0], xyz[1], xyz[2]);
-                                        mesh.rotation.set(rpy[0], rpy[1], rpy[2]);
+                                        
+                                        // For STL files, we need to handle the orientation differently
+                                        if (filename.toLowerCase().endsWith('.stl')) {
+                                            // The rotation was already applied in loadMesh for STLs
+                                            // Just apply the position and any additional rotation from URDF
+                                            mesh.position.set(xyz[0], xyz[1], xyz[2]);
+                                            
+                                            // Create a rotation matrix from the URDF RPY values
+                                            const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
+                                            const quaternion = new THREE.Quaternion().setFromEuler(euler);
+                                            
+                                            // Combine with the existing rotation (which corrects the coordinate system)
+                                            mesh.quaternion.premultiply(quaternion);
+                                        } else {
+                                            // For DAE files, apply transform normally
+                                            mesh.position.set(xyz[0], xyz[1], xyz[2]);
+                                            mesh.rotation.set(rpy[0], rpy[1], rpy[2]);
+                                        }
+                                        
                                         this.logger.info(`Applied transform to ${linkName}: pos=[${xyz.join(',')}], rot=[${rpy.join(',')}]`);
                                     }
 
@@ -832,16 +892,24 @@
                     }
                 }
 
-                // Center and scale the robot
+                // Calculate the bounding box of the robot
                 const box = new THREE.Box3().setFromObject(this.robotGroup);
-                const center = box.getCenter(new THREE.Vector3());
                 const size = box.getSize(new THREE.Vector3());
                 const maxDim = Math.max(size.x, size.y, size.z);
-                const scale = 5 / maxDim;
-                
-                this.robotGroup.position.copy(center).multiplyScalar(-1);
-                this.robotGroup.scale.multiplyScalar(scale);
-                this.logger.info(`Centered and scaled robot: scale=${scale}, center=[${center.x.toFixed(3)},${center.y.toFixed(3)},${center.z.toFixed(3)}]`);
+
+                // Get the bottom of the bounding box (lowest Z point)
+                const bottomPoint = new THREE.Vector3();
+                box.getCenter(bottomPoint);
+                bottomPoint.z -= size.z / 2; // Move to the bottom of the bounding box
+
+                // Position the robot so its base is at Z=0 (on the grid) without scaling
+                this.robotGroup.position.set(-bottomPoint.x, -bottomPoint.y, -bottomPoint.z);
+
+                this.logger.info(`Positioned robot on base frame at actual size: bottom=[${bottomPoint.x.toFixed(3)},${bottomPoint.y.toFixed(3)},${bottomPoint.z.toFixed(3)}]`);
+
+                // Adjust camera position to accommodate the unscaled robot
+                this.spherical.radius = Math.max(maxDim * 1.5, 10); // Set camera distance based on robot size
+                this.updateCameraPosition();
 
                 this.camera.position.set(5, 5, 5);
                 this.camera.lookAt(this.robotGroup.position);
@@ -1155,6 +1223,50 @@
                 }
                 
                 this.logger.info('All joint angles reset to zero');
+            }
+
+            // Add methods to draw and remove the cube
+            drawCube() {
+                // Remove existing cube if any
+                this.removeCube();
+                
+                // Create a 2x2x2 meter cube
+                const geometry = new THREE.BoxGeometry(2, 2, 2);
+                
+                // Create a material with wireframe to see through the cube
+                const material = new THREE.MeshPhongMaterial({
+                    color: 0x9C27B0,
+                    opacity: 0.7,
+                    transparent: true,
+                    wireframe: false,
+                    side: THREE.DoubleSide
+                });
+                
+                // Create the cube mesh
+                this.cube = new THREE.Mesh(geometry, material);
+                
+                // Add wireframe outline
+                const wireframe = new THREE.LineSegments(
+                    new THREE.EdgesGeometry(geometry),
+                    new THREE.LineBasicMaterial({ color: 0xFFFFFF, linewidth: 2 })
+                );
+                this.cube.add(wireframe);
+                
+                // Position the cube at the center of the scene
+                this.cube.position.set(0, 0, 1); // Position slightly above the grid
+                
+                // Add the cube to the scene
+                this.scene.add(this.cube);
+                
+                this.logger.success('Added 2x2x2 meter cube to the scene');
+            }
+
+            removeCube() {
+                if (this.cube) {
+                    this.scene.remove(this.cube);
+                    this.cube = null;
+                    this.logger.info('Removed cube from the scene');
+                }
             }
         }
     </script>
