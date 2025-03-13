@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>URDF Viewer</title>
+    <!-- Load Three.js and wait for it to be ready -->
+    <script src="https://unpkg.com/three@0.140.0/build/three.min.js"></script>
+    <script>
+        // Wait for Three.js to load
+        window.addEventListener('load', function() {
+            // Load additional scripts after Three.js is ready
+            function loadScript(src) {
+                return new Promise((resolve, reject) => {
+                    const script = document.createElement('script');
+                    script.src = src;
+                    script.onload = resolve;
+                    script.onerror = reject;
+                    document.head.appendChild(script);
+                });
+            }
+
+            Promise.all([
+                loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/STLLoader.js'),
+                loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/ColladaLoader.js'),
+                loadScript('js/three-utils.js'),
+                loadScript('js/debug-logger.js'),
+                loadScript('js/mesh-loader.js'),
+                loadScript('js/joint-animator.js'),
+                loadScript('urdfreader.js'),
+                loadScript('js/urdf-visualizer.js')
+            ]).then(() => {
+                // Initialize the viewer after all scripts are loaded
+                if (typeof THREE === 'undefined') {
+                    throw new Error('Three.js failed to load');
+                }
+                if (typeof THREE.STLLoader === 'undefined') {
+                    throw new Error('STLLoader failed to load');
+                }
+                if (typeof THREE.ColladaLoader === 'undefined') {
+                    throw new Error('ColladaLoader failed to load');
+                }
+                // Initialize the visualizer
+                window.visualizer = new URDFVisualizer();
+            }).catch(error => {
+                console.error('Error loading scripts:', error);
+                const debugConsole = document.getElementById('debugConsole');
+                if (debugConsole) {
+                    const timestamp = new Date().toLocaleTimeString();
+                    debugConsole.innerHTML = `<div><span class="timestamp">[${timestamp}]</span> <span class="error">Error loading required scripts: ${error.message}</span></div>`;
+                }
+            });
+        });
+    </script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+            height: calc(100vh - 40px);
+        }
+        .controls {
+            flex: 0 0 300px;
+            min-width: 300px;
+            max-width: 300px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+            max-height: calc(100vh - 80px);
+        }
+        #webgl-container {
+            flex: 1;
+            min-width: 0;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        #treeStructure {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f8f8f8;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            overflow-y: auto;
+            max-height: 200px;
+            flex-grow: 1;
+        }
+        select {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 8px;
+            transition: background-color 0.3s;
+            font-size: 14px;
+        }
+        button:hover {
+            opacity: 0.9;
+        }
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        #loadingStatus {
+            margin-top: 8px;
+            color: #666;
+            font-size: 12px;
+        }
+        #meshStatus {
+            margin-top: 8px;
+            padding: 8px;
+            background: #f8f8f8;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 11px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            overflow-y: auto;
+            max-height: 100px;
+        }
+        #debugConsole {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 150px;
+            background: rgba(30, 30, 30, 0.95);
+            color: #00ff00;
+            font-family: monospace;
+            font-size: 11px;
+            padding: 8px;
+            overflow-y: auto;
+            z-index: 1000;
+            border-top: 2px solid #333;
+            display: block !important;
+            visibility: visible !important;
+        }
+        #debugConsole .timestamp {
+            color: #888;
+            margin-right: 8px;
+            font-size: 10px;
+        }
+        #debugConsole .error {
+            color: #ff4444;
+            font-weight: bold;
+        }
+        #debugConsole .warning {
+            color: #ffaa00;
+            font-weight: bold;
+        }
+        #debugConsole .success {
+            color: #44ff44;
+            font-weight: bold;
+        }
+        #debugConsole .info {
+            color: #00ff00;
+        }
+        h2 {
+            margin: 0 0 16px 0;
+            font-size: 18px;
+        }
+        .controls > div {
+            margin-bottom: 12px;
+        }
+        /* Styles for joint controls */
+        #jointControls {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f8f8f8;
+            border-radius: 4px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .joint-control {
+            margin-bottom: 8px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .joint-name {
+            font-weight: bold;
+            margin-right: 10px;
+            font-size: 12px;
+            flex: 1;
+            min-width: 80px;
+        }
+        .joint-buttons {
+            display: flex;
+            gap: 3px;
+        }
+        .joint-buttons button {
+            flex: 0 0 auto;
+            padding: 3px 6px;
+            margin-top: 0;
+            font-size: 11px;
+            min-width: 30px;
+        }
+        .decrement {
+            background-color: #f44336;
+        }
+        .increment {
+            background-color: #2196F3;
+        }
+        .joint-angle {
+            text-align: right;
+            margin-left: 8px;
+            font-size: 11px;
+            font-family: monospace;
+            min-width: 50px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <h2>URDF Viewer</h2>
+            <div>
+                <label for="modelSelect">Select Robot Model:</label>
+                <select id="modelSelect">
+                    <option value="">Loading models...</option>
+                </select>
+            </div>
+            <button id="loadButton">Load Model</button>
+            <div id="loadingStatus"></div>
+            <div id="meshStatus"></div>
+            
+            <!-- Joint controls section -->
+            <div id="jointControls" style="display: none;">
+                <h3>Joint Controls</h3>
+                <div id="jointControlsContainer"></div>
+            </div>
+            
+            <div id="treeStructure"></div>
+            <div>
+                <button id="animateButton" style="background: #2196F3;">Animate Joints</button>
+                <div id="animationStatus"></div>
+            </div>
+        </div>
+        <div id="webgl-container"></div>
+    </div>
+    <div id="debugConsole"></div>
+</body>
+</html> 
