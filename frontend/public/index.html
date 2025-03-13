@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JSROB - Robot Visualization Tools</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2196F3;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .tool-section {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+        .tool-section h2 {
+            color: #333;
+            margin-top: 0;
+        }
+        .tool-section p {
+            color: #666;
+            margin-bottom: 15px;
+        }
+        .button {
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: #2196F3;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+            transition: background-color 0.3s;
+        }
+        .button:hover {
+            background-color: #1976D2;
+        }
+        .features {
+            list-style-type: none;
+            padding: 0;
+        }
+        .features li {
+            margin-bottom: 10px;
+            padding-left: 20px;
+            position: relative;
+        }
+        .features li:before {
+            content: "•";
+            color: #2196F3;
+            position: absolute;
+            left: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>JSROB - Robot Visualization Tools</h1>
+        
+        <div class="tool-section">
+            <h2>URDF Viewer</h2>
+            <p>Interactive 3D visualization tool for URDF robot models.</p>
+            <ul class="features">
+                <li>Load and visualize URDF robot models</li>
+                <li>Support for COLLADA (.dae) and STL mesh files</li>
+                <li>Interactive 3D viewing with pan, zoom, and rotate</li>
+                <li>Joint animation capabilities</li>
+                <li>Real-time debug console</li>
+                <li>Tree structure visualization</li>
+            </ul>
+            <a href="/public/urdf_viewer.html" class="button">Launch URDF Viewer</a>
+        </div>
+
+        <div class="tool-section">
+            <h2>STL Viewer</h2>
+            <p>Dedicated viewer for STL (STereoLithography) 3D model files.</p>
+            <ul class="features">
+                <li>Direct visualization of STL files</li>
+                <li>Support for both ASCII and binary STL formats</li>
+                <li>Interactive 3D manipulation</li>
+                <li>Model measurements and statistics</li>
+            </ul>
+            <a href="/public/stl_viewer.html" class="button">Launch STL Viewer</a>
+        </div>
+
+        <div class="tool-section">
+            <h2>URDF Reader</h2>
+            <p>Advanced URDF file parser and inspector.</p>
+            <ul class="features">
+                <li>Parse and validate URDF files</li>
+                <li>Inspect joint configurations</li>
+                <li>View robot structure hierarchy</li>
+                <li>Analyze link transformations</li>
+            </ul>
+            <a href="/public/urdfreader.html" class="button">Launch URDF Reader</a>
+        </div>
+
+        <div class="tool-section">
+            <h2>Getting Started</h2>
+            <p>To use the URDF Viewer:</p>
+            <ol>
+                <li>Place your URDF files in the <code>/public/models</code> directory</li>
+                <li>Place corresponding mesh files (.dae or .stl) in <code>/public/models/meshes</code></li>
+                <li>Launch the appropriate viewer using the buttons above</li>
+                <li>Select your model from the dropdown menu</li>
+                <li>Use mouse to interact with the 3D view:
+                    <ul>
+                        <li>Left click + drag to rotate</li>
+                        <li>Mouse wheel to zoom</li>
+                    </ul>
+                </li>
+            </ol>
+        </div>
+
+        <div class="tool-section">
+            <h2>Example Models</h2>
+            <p>The following example models are included:</p>
+            <ul class="features">
+                <li>KUKA LBR iiwa 7 R800 robot arm</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html> 

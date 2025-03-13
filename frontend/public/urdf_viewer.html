@@ -180,6 +180,54 @@
         .controls > div {
             margin-bottom: 12px;
         }
+        /* New styles for joint controls */
+        #jointControls {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f8f8f8;
+            border-radius: 4px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .joint-control {
+            margin-bottom: 8px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .joint-name {
+            font-weight: bold;
+            margin-right: 10px;
+            font-size: 12px;
+            flex: 1;
+            min-width: 80px;
+        }
+        .joint-buttons {
+            display: flex;
+            gap: 3px;
+        }
+        .joint-buttons button {
+            flex: 0 0 auto;
+            padding: 3px 6px;
+            margin-top: 0;
+            font-size: 11px;
+            min-width: 30px;
+        }
+        .decrement {
+            background-color: #f44336;
+        }
+        .increment {
+            background-color: #2196F3;
+        }
+        .joint-angle {
+            text-align: right;
+            margin-left: 8px;
+            font-size: 11px;
+            font-family: monospace;
+            min-width: 50px;
+        }
     </style>
 </head>
 <body>
@@ -195,6 +243,13 @@
             <button id="loadButton">Load Model</button>
             <div id="loadingStatus"></div>
             <div id="meshStatus"></div>
+            
+            <!-- New joint controls section -->
+            <div id="jointControls" style="display: none;">
+                <h3>Joint Controls</h3>
+                <div id="jointControlsContainer"></div>
+            </div>
+            
             <div id="treeStructure"></div>
             <div>
                 <button id="animateButton" style="background: #2196F3;">Animate Joints</button>
@@ -250,7 +305,7 @@
                 this.isAnimating = false;
                 this.currentJointIndex = 0;
                 this.animationTime = 0;
-                this.animationDuration = 2;
+                this.animationDuration = 3.0;
                 this.jointAngles = new Map();
 
                 // Initialize loaders after Three.js is loaded
@@ -339,6 +394,21 @@
                 container.addEventListener('mouseleave', this.onMouseUp.bind(this));
                 container.addEventListener('wheel', this.onMouseWheel.bind(this));
                 window.addEventListener('resize', this.onWindowResize.bind(this));
+
+                // Add animation button event listener
+                const animateButton = document.getElementById('animateButton');
+                if (animateButton) {
+                    animateButton.addEventListener('click', () => {
+                        if (this.isAnimating) {
+                            this.stopAnimation();
+                        } else {
+                            this.startAnimation();
+                        }
+                    });
+                    this.logger.info('Animation button event listener added');
+                } else {
+                    this.logger.error('Animation button not found in DOM');
+                }
             }
 
             updateCameraPosition() {
@@ -426,13 +496,18 @@
             }
 
             startAnimation() {
+                if (!this.jointObjects || this.jointObjects.size === 0) {
+                    this.logger.warning('No joints available to animate');
+                    return;
+                }
                 this.isAnimating = true;
                 this.currentJointIndex = 0;
                 this.animationTime = 0;
-                this.jointAngles.clear();
+                this.animationDuration = 3.0; // Increased duration for smoother animation
                 document.getElementById('animateButton').style.background = '#f44336';
                 document.getElementById('animateButton').textContent = 'Stop Animation';
                 this.updateAnimationStatus();
+                this.logger.info('Starting joint animation');
             }
 
             stopAnimation() {
@@ -440,64 +515,106 @@
                 document.getElementById('animateButton').style.background = '#2196F3';
                 document.getElementById('animateButton').textContent = 'Animate Joints';
                 document.getElementById('animationStatus').textContent = '';
-                // Reset all joints to zero
-                for (const [jointName, jointObject] of this.jointObjects) {
-                    jointObject.rotation.set(0, 0, 0);
-                }
+                
+                // Reset all joints to zero rotation
+                this.resetJointAngles();
+                
+                this.logger.info('Animation stopped');
             }
 
             updateAnimationStatus() {
                 const status = document.getElementById('animationStatus');
-                if (this.isAnimating) {
+                if (this.isAnimating && status) {
                     const jointNames = Array.from(this.jointObjects.keys());
                     const currentJoint = jointNames[this.currentJointIndex];
                     status.textContent = `Animating joint: ${currentJoint}`;
+                    this.logger.info(`Currently animating joint: ${currentJoint}`);
                 }
             }
 
             updateJointAnimation() {
+                if (!this.isAnimating) return;
+
                 const jointNames = Array.from(this.jointObjects.keys());
                 const currentJoint = jointNames[this.currentJointIndex];
                 const jointObject = this.jointObjects.get(currentJoint);
+                const jointData = this.urdfReader.robot.joints.get(currentJoint);
                 
-                if (jointObject) {
+                if (jointObject && jointData) {
                     // Calculate angle based on time
                     const progress = this.animationTime / this.animationDuration;
                     let angle;
                     
-                    if (progress < 0.5) {
-                        // First half: 0 to 45 degrees
-                        angle = (progress * 2) * Math.PI / 4;
+                    if (progress < 0.25) {
+                        // First quarter: 0 to +45 degrees
+                        angle = (progress * 4) * Math.PI / 4;
+                    } else if (progress < 0.75) {
+                        // Middle half: +45 to -45 degrees
+                        angle = ((0.5 - (progress - 0.25) * 2) * Math.PI / 2);
                     } else {
-                        // Second half: 45 to -45 degrees
-                        angle = (1 - (progress - 0.5) * 2) * Math.PI / 4;
+                        // Last quarter: -45 to 0 degrees
+                        angle = (-1 + (progress - 0.75) * 4) * Math.PI / 4;
                     }
                     
-                    // Apply rotation based on joint type
-                    const jointData = this.urdfReader.robot.joints.get(currentJoint);
-                    if (jointData) {
-                        switch (jointData.type) {
-                            case 'revolute':
-                                // Apply rotation around the joint's axis
-                                const axis = jointData.axis || [1, 0, 0];
-                                jointObject.rotation.set(
-                                    axis[0] * angle,
-                                    axis[1] * angle,
-                                    axis[2] * angle
-                                );
-                                break;
-                            case 'continuous':
-                                // Similar to revolute but can rotate continuously
-                                const continuousAxis = jointData.axis || [1, 0, 0];
-                                jointObject.rotation.set(
-                                    continuousAxis[0] * angle,
-                                    continuousAxis[1] * angle,
-                                    continuousAxis[2] * angle
-                                );
-                                break;
-                            // Add other joint types as needed
+                    // Get the joint's axis of rotation
+                    const axis = jointData.axis || [0, 0, 1];
+                    
+                    // Reset transformation
+                    jointObject.position.set(0, 0, 0);
+                    jointObject.quaternion.set(0, 0, 0, 1);
+                    jointObject.scale.set(1, 1, 1);
+                    
+                    // Apply original transform from URDF
+                    if (jointData.origin) {
+                        const xyz = jointData.origin.xyz || [0, 0, 0];
+                        const rpy = jointData.origin.rpy || [0, 0, 0];
+                        
+                        // Apply position
+                        jointObject.position.set(xyz[0], xyz[1], xyz[2]);
+                        
+                        // Apply original rotation
+                        const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
+                        jointObject.setRotationFromEuler(euler);
+                    }
+                    
+                    // Apply joint rotation around axis
+                    const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
+                    const rotQuat = new THREE.Quaternion();
+                    rotQuat.setFromAxisAngle(axisVec, angle);
+                    
+                    // Combine with existing rotation
+                    jointObject.quaternion.multiply(rotQuat);
+                    
+                    this.logger.info(`Joint ${currentJoint} angle: ${(angle * 180 / Math.PI).toFixed(2)}° around axis [${axis.join(', ')}]`);
+                }
+
+                // Update animation time and check for completion
+                this.animationTime += 0.016; // Assuming 60fps
+                if (this.animationTime >= this.animationDuration) {
+                    // Reset current joint to initial transform
+                    if (jointObject && jointData) {
+                        jointObject.position.set(0, 0, 0);
+                        jointObject.quaternion.set(0, 0, 0, 1);
+                        jointObject.scale.set(1, 1, 1);
+                        
+                        if (jointData.origin) {
+                            const xyz = jointData.origin.xyz || [0, 0, 0];
+                            const rpy = jointData.origin.rpy || [0, 0, 0];
+                            
+                            jointObject.position.set(xyz[0], xyz[1], xyz[2]);
+                            const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
+                            jointObject.setRotationFromEuler(euler);
                         }
                     }
+                    
+                    this.animationTime = 0;
+                    this.currentJointIndex++;
+                    
+                    if (this.currentJointIndex >= this.jointObjects.size) {
+                        this.currentJointIndex = 0;
+                    }
+                    
+                    this.updateAnimationStatus();
                 }
             }
 
@@ -812,6 +929,9 @@
 
                     // Clear existing robot
                     this.clearRobot();
+                    
+                    // Reset joint angles
+                    this.jointAngles.clear();
 
                     // Load and parse the URDF
                     this.logger.info('Requesting URDF file from server...');
@@ -827,6 +947,9 @@
                     // Visualize the robot
                     this.logger.info('Starting robot visualization...');
                     await this.visualizeRobot(robotData);
+                    
+                    // Create joint control buttons
+                    this.createJointControls();
 
                     loadingStatus.textContent = 'Model loaded successfully';
                     this.logger.success('Robot model fully loaded and visualized');
@@ -838,6 +961,200 @@
                 } finally {
                     loadButton.disabled = false;
                 }
+            }
+
+            // Add new method to create joint control buttons
+            createJointControls() {
+                const jointControlsContainer = document.getElementById('jointControlsContainer');
+                jointControlsContainer.innerHTML = '';
+                
+                if (this.jointObjects.size === 0) {
+                    jointControlsContainer.innerHTML = '<p>No joints available to control</p>';
+                    return;
+                }
+                
+                // Show the joint controls section
+                document.getElementById('jointControls').style.display = 'block';
+                
+                // Initialize joint angles if not already set
+                for (const [jointName, jointObject] of this.jointObjects) {
+                    if (!this.jointAngles.has(jointName)) {
+                        this.jointAngles.set(jointName, 0);
+                    }
+                }
+                
+                // Create controls for each joint
+                for (const [jointName, jointObject] of this.jointObjects) {
+                    const jointData = this.urdfReader.robot.joints.get(jointName);
+                    
+                    // Skip fixed joints
+                    if (jointData.type === 'fixed') {
+                        continue;
+                    }
+                    
+                    const jointControlDiv = document.createElement('div');
+                    jointControlDiv.className = 'joint-control';
+                    
+                    const jointNameDiv = document.createElement('div');
+                    jointNameDiv.className = 'joint-name';
+                    jointNameDiv.textContent = jointName;
+                    jointControlDiv.appendChild(jointNameDiv);
+                    
+                    const jointButtonsDiv = document.createElement('div');
+                    jointButtonsDiv.className = 'joint-buttons';
+                    
+                    // Create decrement button (-2 degrees)
+                    const decrementButton = document.createElement('button');
+                    decrementButton.className = 'decrement';
+                    decrementButton.textContent = '-2°';
+                    
+                    // Add continuous rotation with mousedown/touchstart events
+                    let decrementInterval;
+                    decrementButton.addEventListener('mousedown', () => {
+                        this.adjustJointAngle(jointName, -2 * Math.PI / 180);
+                        decrementInterval = setInterval(() => {
+                            this.adjustJointAngle(jointName, -2 * Math.PI / 180);
+                        }, 100); // Adjust every 100ms while button is held
+                    });
+                    
+                    // Stop on mouseup/mouseleave/touchend
+                    const stopDecrement = () => {
+                        if (decrementInterval) {
+                            clearInterval(decrementInterval);
+                            decrementInterval = null;
+                        }
+                    };
+                    
+                    decrementButton.addEventListener('mouseup', stopDecrement);
+                    decrementButton.addEventListener('mouseleave', stopDecrement);
+                    decrementButton.addEventListener('touchend', stopDecrement);
+                    
+                    jointButtonsDiv.appendChild(decrementButton);
+                    
+                    // Create increment button (+2 degrees)
+                    const incrementButton = document.createElement('button');
+                    incrementButton.className = 'increment';
+                    incrementButton.textContent = '+2°';
+                    
+                    // Add continuous rotation with mousedown/touchstart events
+                    let incrementInterval;
+                    incrementButton.addEventListener('mousedown', () => {
+                        this.adjustJointAngle(jointName, 2 * Math.PI / 180);
+                        incrementInterval = setInterval(() => {
+                            this.adjustJointAngle(jointName, 2 * Math.PI / 180);
+                        }, 100); // Adjust every 100ms while button is held
+                    });
+                    
+                    // Stop on mouseup/mouseleave/touchend
+                    const stopIncrement = () => {
+                        if (incrementInterval) {
+                            clearInterval(incrementInterval);
+                            incrementInterval = null;
+                        }
+                    };
+                    
+                    incrementButton.addEventListener('mouseup', stopIncrement);
+                    incrementButton.addEventListener('mouseleave', stopIncrement);
+                    incrementButton.addEventListener('touchend', stopIncrement);
+                    
+                    jointButtonsDiv.appendChild(incrementButton);
+                    
+                    jointControlDiv.appendChild(jointButtonsDiv);
+                    
+                    // Add angle display
+                    const jointAngleDiv = document.createElement('div');
+                    jointAngleDiv.className = 'joint-angle';
+                    jointAngleDiv.id = `angle-${jointName}`;
+                    jointAngleDiv.textContent = '0.00°';
+                    jointControlDiv.appendChild(jointAngleDiv);
+                    
+                    jointControlsContainer.appendChild(jointControlDiv);
+                }
+                
+                this.logger.info('Joint control buttons created');
+            }
+            
+            // Add method to adjust joint angle
+            adjustJointAngle(jointName, deltaAngle) {
+                if (!this.jointObjects.has(jointName)) {
+                    this.logger.warning(`Joint ${jointName} not found`);
+                    return;
+                }
+                
+                // Stop animation if it's running
+                if (this.isAnimating) {
+                    this.stopAnimation();
+                }
+                
+                const jointObject = this.jointObjects.get(jointName);
+                const jointData = this.urdfReader.robot.joints.get(jointName);
+                
+                if (!jointObject || !jointData) {
+                    this.logger.warning(`Joint data not found for ${jointName}`);
+                    return;
+                }
+                
+                // Get current angle and update it
+                let currentAngle = this.jointAngles.get(jointName) || 0;
+                currentAngle += deltaAngle;
+                this.jointAngles.set(jointName, currentAngle);
+                
+                // Update angle display
+                const angleDisplay = document.getElementById(`angle-${jointName}`);
+                if (angleDisplay) {
+                    angleDisplay.textContent = `${(currentAngle * 180 / Math.PI).toFixed(2)}°`;
+                }
+                
+                // Get the joint's axis of rotation
+                const axis = jointData.axis || [0, 0, 1];
+                
+                // Reset transformation
+                jointObject.position.set(0, 0, 0);
+                jointObject.quaternion.set(0, 0, 0, 1);
+                jointObject.scale.set(1, 1, 1);
+                
+                // Apply original transform from URDF
+                if (jointData.origin) {
+                    const xyz = jointData.origin.xyz || [0, 0, 0];
+                    const rpy = jointData.origin.rpy || [0, 0, 0];
+                    
+                    // Apply position
+                    jointObject.position.set(xyz[0], xyz[1], xyz[2]);
+                    
+                    // Apply original rotation
+                    const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
+                    jointObject.setRotationFromEuler(euler);
+                }
+                
+                // Apply joint rotation around axis
+                const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
+                const rotQuat = new THREE.Quaternion();
+                rotQuat.setFromAxisAngle(axisVec, currentAngle);
+                
+                // Combine with existing rotation
+                jointObject.quaternion.multiply(rotQuat);
+                
+                this.logger.info(`Joint ${jointName} angle adjusted to: ${(currentAngle * 180 / Math.PI).toFixed(2)}° around axis [${axis.join(', ')}]`);
+            }
+            
+            // Reset all joint angles
+            resetJointAngles() {
+                for (const [jointName, angle] of this.jointAngles) {
+                    if (angle !== 0) {
+                        this.jointAngles.set(jointName, 0);
+                        this.adjustJointAngle(jointName, 0);
+                    }
+                }
+                
+                // Update all angle displays
+                for (const jointName of this.jointAngles.keys()) {
+                    const angleDisplay = document.getElementById(`angle-${jointName}`);
+                    if (angleDisplay) {
+                        angleDisplay.textContent = '0.00°';
+                    }
+                }
+                
+                this.logger.info('All joint angles reset to zero');
             }
         }
     </script>
