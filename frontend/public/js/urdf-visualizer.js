@@ -21,6 +21,7 @@ class URDFVisualizer {
             treeStructureId: 'treeStructure',
             jointControlsId: 'jointControls',
             jointControlsContainerId: 'jointControlsContainer',
+            colorSchemeSelectId: 'colorSchemeSelect',
             showJointLimits: true,
             jointStepSize: 2 // Default step size in degrees
         };
@@ -32,6 +33,16 @@ class URDFVisualizer {
         this.urdfReader = new URDFReader();
         this.meshLoader = new MeshLoader(this.logger);
         this.jointAnimator = new JointAnimator(this.logger, this.urdfReader);
+        
+        // Color scheme options
+        this.colorSchemes = [
+            { name: "Vibrant", colors: [0x4285F4, 0xEA4335, 0xFBBC05, 0x34A853, 0x8F00FF, 0x00FFFF, 0xFF00FF] },
+            { name: "Pastel", colors: [0xFFB3BA, 0xFFDFBA, 0xFFFDBA, 0xBAFFDA, 0xBAE1FF, 0xD0BAFF, 0xFFBAF9] },
+            { name: "Blue to Red", colors: [0x0000FF, 0x4444FF, 0x8888FF, 0xCCCCFF, 0xFFCCCC, 0xFF8888, 0xFF4444, 0xFF0000] },
+            { name: "Grayscale", colors: [0x111111, 0x333333, 0x555555, 0x777777, 0x999999, 0xBBBBBB, 0xDDDDDD] },
+            { name: "Rainbow", colors: [0xFF0000, 0xFF7F00, 0xFFFF00, 0x00FF00, 0x0000FF, 0x4B0082, 0x9400D3] }
+        ];
+        this.currentColorScheme = 0; // Default to vibrant
         
         // Initialize Three.js objects
         this.scene = null;
@@ -53,6 +64,7 @@ class URDFVisualizer {
         // Initialize the viewer
         this.init();
         this.setupEventListeners();
+        this.setupColorSchemeSelector();
         this.loadAvailableModels();
         this.animate();
     }
@@ -139,6 +151,45 @@ class URDFVisualizer {
         } else {
             this.logger.error(`Animation button with ID '${this.options.animateButtonId}' not found`);
         }
+    }
+    
+    /**
+     * Sets up the color scheme selector
+     */
+    setupColorSchemeSelector() {
+        const colorSchemeSelect = document.getElementById(this.options.colorSchemeSelectId);
+        if (!colorSchemeSelect) {
+            this.logger.warning(`Color scheme select with ID '${this.options.colorSchemeSelectId}' not found`);
+            return;
+        }
+        
+        // Clear existing options
+        colorSchemeSelect.innerHTML = '';
+        
+        // Add options for each color scheme
+        this.colorSchemes.forEach((scheme, index) => {
+            const option = document.createElement('option');
+            option.value = index;
+            option.textContent = scheme.name;
+            colorSchemeSelect.appendChild(option);
+        });
+        
+        // Set default value
+        colorSchemeSelect.value = this.currentColorScheme;
+        
+        // Add event listener
+        colorSchemeSelect.addEventListener('change', (event) => {
+            this.currentColorScheme = parseInt(event.target.value);
+            this.logger.info(`Changed color scheme to: ${this.colorSchemes[this.currentColorScheme].name}`);
+            
+            // If a robot is loaded, reload it to apply the new color scheme
+            const modelSelect = document.getElementById(this.options.modelSelectId);
+            if (modelSelect && modelSelect.value) {
+                this.loadSelectedModel();
+            }
+        });
+        
+        this.logger.info('Color scheme selector initialized');
     }
     
     /**
@@ -420,6 +471,49 @@ class URDFVisualizer {
     }
     
     /**
+     * Generates a color based on the link's depth in the kinematic chain
+     * @param {number} depth - The depth of the link in the kinematic chain
+     * @returns {THREE.Color} - The color for the link
+     */
+    generateLinkColor(depth) {
+        // Get the current color scheme
+        const scheme = this.colorSchemes[this.currentColorScheme];
+        const colors = scheme.colors;
+        
+        // Get color based on depth, cycling through the array
+        const colorIndex = depth % colors.length;
+        return new THREE.Color(colors[colorIndex]);
+    }
+
+    /**
+     * Applies a color to all meshes in a group
+     * @param {THREE.Group} group - The group containing meshes
+     * @param {THREE.Color} color - The color to apply
+     */
+    applyColorToGroup(group, color) {
+        group.traverse(child => {
+            if (child.isMesh) {
+                // Create a new material with the specified color
+                if (child.material) {
+                    // If it's an array of materials, update each one
+                    if (Array.isArray(child.material)) {
+                        child.material = child.material.map(mat => {
+                            const newMat = mat.clone();
+                            newMat.color.set(color);
+                            return newMat;
+                        });
+                    } else {
+                        // Clone the material to avoid affecting other meshes
+                        const newMaterial = child.material.clone();
+                        newMaterial.color.set(color);
+                        child.material = newMaterial;
+                    }
+                }
+            }
+        });
+    }
+
+    /**
      * Visualizes the robot model
      * @param {Object} robotData - The robot data from the URDF parser
      */
@@ -480,6 +574,45 @@ class URDFVisualizer {
         }
         
         this.logger.info('Building joint structure...');
+        
+        // Calculate link depths in the kinematic chain
+        const linkDepths = new Map();
+        
+        // Initialize root links with depth 0
+        for (const rootLink of robotData.rootLinks) {
+            linkDepths.set(rootLink, 0);
+        }
+        
+        // Traverse the tree to calculate depths
+        const calculateDepths = (linkName, depth) => {
+            // Get all joints where this link is the parent
+            for (const [jointName, jointData] of robotData.joints) {
+                if (jointData.parent === linkName) {
+                    const childLink = jointData.child;
+                    // Only update if we haven't visited this link or if we found a shorter path
+                    if (!linkDepths.has(childLink) || linkDepths.get(childLink) > depth + 1) {
+                        linkDepths.set(childLink, depth + 1);
+                        calculateDepths(childLink, depth + 1);
+                    }
+                }
+            }
+        };
+        
+        // Start depth calculation from root links
+        for (const rootLink of robotData.rootLinks) {
+            calculateDepths(rootLink, 0);
+        }
+        
+        // Apply colors based on link depths
+        for (const [linkName, depth] of linkDepths) {
+            const linkObject = linkObjects.get(linkName);
+            if (linkObject) {
+                const color = this.generateLinkColor(depth);
+                this.applyColorToGroup(linkObject, color);
+                this.logger.info(`Applied color to link ${linkName} at depth ${depth}`);
+            }
+        }
+        
         // Build the tree structure
         for (const [jointName, jointData] of robotData.joints) {
             const parentLink = linkObjects.get(jointData.parent);
@@ -502,15 +635,74 @@ class URDFVisualizer {
                 parentLink.add(jointGroup);
                 this.jointObjects.set(jointName, jointGroup);
                 
+                // Create a gnomon (coordinate frame) for the joint axis
+                const axisSize = 0.2; // Size of the gnomon
                 const jointAxis = jointData.axis || [1, 0, 0];
-                const axisHelper = new THREE.ArrowHelper(
-                    new THREE.Vector3(jointAxis[0], jointAxis[1], jointAxis[2]),
+                
+                // Create a group for the gnomon
+                const gnomonGroup = new THREE.Group();
+                gnomonGroup.name = `${jointName}_gnomon`;
+                
+                // Create the three axes with standard colors
+                // X axis - Red
+                const xAxis = new THREE.ArrowHelper(
+                    new THREE.Vector3(1, 0, 0),
                     new THREE.Vector3(0, 0, 0),
-                    0.5,
-                    0xff0000
+                    axisSize,
+                    0xff0000, // Red
+                    axisSize * 0.2, // Head length
+                    axisSize * 0.1  // Head width
                 );
-                jointGroup.add(axisHelper);
-                this.logger.info(`Added joint axis indicator for ${jointName}: [${jointAxis.join(',')}]`);
+                gnomonGroup.add(xAxis);
+                
+                // Y axis - Green
+                const yAxis = new THREE.ArrowHelper(
+                    new THREE.Vector3(0, 1, 0),
+                    new THREE.Vector3(0, 0, 0),
+                    axisSize,
+                    0x00ff00, // Green
+                    axisSize * 0.2, // Head length
+                    axisSize * 0.1  // Head width
+                );
+                gnomonGroup.add(yAxis);
+                
+                // Z axis - Blue
+                const zAxis = new THREE.ArrowHelper(
+                    new THREE.Vector3(0, 0, 1),
+                    new THREE.Vector3(0, 0, 0),
+                    axisSize,
+                    0x0000ff, // Blue
+                    axisSize * 0.2, // Head length
+                    axisSize * 0.1  // Head width
+                );
+                gnomonGroup.add(zAxis);
+                
+                // Highlight the joint's rotation axis with a thicker, yellow arrow
+                const jointAxisVector = new THREE.Vector3(jointAxis[0], jointAxis[1], jointAxis[2]).normalize();
+                const rotationAxis = new THREE.ArrowHelper(
+                    jointAxisVector,
+                    new THREE.Vector3(0, 0, 0),
+                    axisSize * 1.2, // Make it slightly longer
+                    0xffff00, // Yellow
+                    axisSize * 0.25, // Larger head
+                    axisSize * 0.15  // Thicker
+                );
+                gnomonGroup.add(rotationAxis);
+                
+                // Add text label for the joint name
+                const textSprite = this.createTextSprite(jointName, { 
+                    fontsize: 24, // Reduce font size further from 40 to 24
+                    borderColor: {r:0, g:0, b:0, a:0.0}, // Transparent border (no outline)
+                    backgroundColor: {r:255, g:255, b:255, a:0.7}, // Slightly transparent background
+                    textColor: {r:0, g:0, b:0, a:1.0} // Black text
+                });
+                textSprite.position.set(0, 0, axisSize * 1.1); // Position even closer to the joint
+                textSprite.scale.set(0.15, 0.08, 1.0); // Make the sprite even smaller
+                gnomonGroup.add(textSprite);
+                
+                jointGroup.add(gnomonGroup);
+                
+                this.logger.info(`Added gnomon for joint ${jointName} with rotation axis: [${jointAxis.join(',')}]`);
             }
         }
         
@@ -558,10 +750,15 @@ class URDFVisualizer {
         
         jointControlsContainer.innerHTML = '';
         
-        if (this.jointObjects.size === 0) {
+        if (!this.jointObjects || this.jointObjects.size === 0) {
+            this.logger.warning('No joints available to control');
             jointControlsContainer.innerHTML = '<p>No joints available to control</p>';
             return;
         }
+        
+        // Ensure the JointAnimator has the latest joint objects and data
+        this.logger.debug(`Updating JointAnimator with ${this.jointObjects.size} joints`, true);
+        this.jointAnimator.setJoints(this.jointObjects, this.urdfReader.robot.joints);
         
         // Show the joint controls section
         const jointControls = document.getElementById(this.options.jointControlsId);
@@ -570,23 +767,33 @@ class URDFVisualizer {
         }
         
         // Create controls for each joint
+        let movableJointCount = 0;
         for (const [jointName, jointObject] of this.jointObjects) {
+            // Get joint data from URDF reader
             const jointData = this.urdfReader.robot.joints.get(jointName);
-            
-            // Skip fixed joints
-            if (jointData.type === 'fixed') {
+            if (!jointData) {
+                this.logger.warning(`Joint data not found for ${jointName}, skipping control creation`);
                 continue;
             }
             
+            // Skip fixed joints
+            if (jointData.type === 'fixed') {
+                this.logger.debug(`Skipping fixed joint ${jointName}`, true);
+                continue;
+            }
+            
+            movableJointCount++;
+            
             const jointControlDiv = document.createElement('div');
             jointControlDiv.className = 'joint-control';
+            jointControlDiv.dataset.jointName = jointName; // Store joint name in dataset for easier access
             
             // Create joint name and type display
             const jointNameDiv = document.createElement('div');
             jointNameDiv.className = 'joint-name';
             
             // Add joint type to the display
-            let jointTypeInfo = jointData.type;
+            let jointTypeInfo = jointData.type || 'unknown';
             jointNameDiv.textContent = `${jointName} (${jointTypeInfo})`;
             jointControlDiv.appendChild(jointNameDiv);
             
@@ -610,17 +817,35 @@ class URDFVisualizer {
             const decrementButton = document.createElement('button');
             decrementButton.className = 'decrement';
             decrementButton.textContent = `-${this.options.jointStepSize}°`;
+            decrementButton.dataset.jointName = jointName; // Store joint name in dataset
+            decrementButton.dataset.action = 'decrement'; // Store action in dataset
             
             // Add continuous rotation with mousedown/touchstart events
             let decrementInterval;
-            decrementButton.addEventListener('mousedown', () => {
-                this.jointAnimator.adjustJointAngle(jointName, -stepSizeRad);
-                this.updateJointAngleDisplay(jointName);
-                decrementInterval = setInterval(() => {
-                    this.jointAnimator.adjustJointAngle(jointName, -stepSizeRad);
-                    this.updateJointAngleDisplay(jointName);
-                }, 100); // Adjust every 100ms while button is held
-            });
+            const handleDecrementStart = () => {
+                try {
+                    this.logger.debug(`Decrementing joint ${jointName} by ${stepSizeRad.toFixed(4)} radians`, true);
+                    const result = this.jointAnimator.adjustJointAngle(jointName, -stepSizeRad);
+                    if (result === null) {
+                        this.logger.error(`Failed to decrement joint ${jointName}`);
+                    } else {
+                        this.updateJointAngleDisplay(jointName);
+                    }
+                    
+                    decrementInterval = setInterval(() => {
+                        const result = this.jointAnimator.adjustJointAngle(jointName, -stepSizeRad);
+                        if (result === null) {
+                            this.logger.error(`Failed to decrement joint ${jointName} in interval`);
+                            stopDecrement(); // Stop the interval if we failed
+                        } else {
+                            this.updateJointAngleDisplay(jointName);
+                        }
+                    }, 100); // Adjust every 100ms while button is held
+                } catch (error) {
+                    this.logger.error(`Error in decrement handler for joint ${jointName}: ${error.message}`);
+                    stopDecrement();
+                }
+            };
             
             // Stop on mouseup/mouseleave/touchend
             const stopDecrement = () => {
@@ -630,6 +855,8 @@ class URDFVisualizer {
                 }
             };
             
+            decrementButton.addEventListener('mousedown', handleDecrementStart);
+            decrementButton.addEventListener('touchstart', handleDecrementStart);
             decrementButton.addEventListener('mouseup', stopDecrement);
             decrementButton.addEventListener('mouseleave', stopDecrement);
             decrementButton.addEventListener('touchend', stopDecrement);
@@ -640,17 +867,35 @@ class URDFVisualizer {
             const incrementButton = document.createElement('button');
             incrementButton.className = 'increment';
             incrementButton.textContent = `+${this.options.jointStepSize}°`;
+            incrementButton.dataset.jointName = jointName; // Store joint name in dataset
+            incrementButton.dataset.action = 'increment'; // Store action in dataset
             
             // Add continuous rotation with mousedown/touchstart events
             let incrementInterval;
-            incrementButton.addEventListener('mousedown', () => {
-                this.jointAnimator.adjustJointAngle(jointName, stepSizeRad);
-                this.updateJointAngleDisplay(jointName);
-                incrementInterval = setInterval(() => {
-                    this.jointAnimator.adjustJointAngle(jointName, stepSizeRad);
-                    this.updateJointAngleDisplay(jointName);
-                }, 100); // Adjust every 100ms while button is held
-            });
+            const handleIncrementStart = () => {
+                try {
+                    this.logger.debug(`Incrementing joint ${jointName} by ${stepSizeRad.toFixed(4)} radians`, true);
+                    const result = this.jointAnimator.adjustJointAngle(jointName, stepSizeRad);
+                    if (result === null) {
+                        this.logger.error(`Failed to increment joint ${jointName}`);
+                    } else {
+                        this.updateJointAngleDisplay(jointName);
+                    }
+                    
+                    incrementInterval = setInterval(() => {
+                        const result = this.jointAnimator.adjustJointAngle(jointName, stepSizeRad);
+                        if (result === null) {
+                            this.logger.error(`Failed to increment joint ${jointName} in interval`);
+                            stopIncrement(); // Stop the interval if we failed
+                        } else {
+                            this.updateJointAngleDisplay(jointName);
+                        }
+                    }, 100); // Adjust every 100ms while button is held
+                } catch (error) {
+                    this.logger.error(`Error in increment handler for joint ${jointName}: ${error.message}`);
+                    stopIncrement();
+                }
+            };
             
             // Stop on mouseup/mouseleave/touchend
             const stopIncrement = () => {
@@ -660,6 +905,8 @@ class URDFVisualizer {
                 }
             };
             
+            incrementButton.addEventListener('mousedown', handleIncrementStart);
+            incrementButton.addEventListener('touchstart', handleIncrementStart);
             incrementButton.addEventListener('mouseup', stopIncrement);
             incrementButton.addEventListener('mouseleave', stopIncrement);
             incrementButton.addEventListener('touchend', stopIncrement);
@@ -670,19 +917,27 @@ class URDFVisualizer {
             const resetButton = document.createElement('button');
             resetButton.className = 'reset';
             resetButton.textContent = 'Reset';
+            resetButton.dataset.jointName = jointName; // Store joint name in dataset
+            resetButton.dataset.action = 'reset'; // Store action in dataset
+            
             resetButton.addEventListener('click', () => {
-                // Reset this specific joint
-                if (jointData.limit) {
-                    // Reset to middle of range if limits exist
-                    const midPosition = (jointData.limit.upper + jointData.limit.lower) / 2;
-                    this.urdfReader.setJointPosition(jointName, midPosition);
-                    this.jointAnimator.resetJoint(jointName, jointObject, jointData);
-                } else {
-                    // Reset to zero if no limits
-                    this.urdfReader.setJointPosition(jointName, 0);
-                    this.jointAnimator.resetJoint(jointName, jointObject, jointData);
+                try {
+                    this.logger.debug(`Resetting joint ${jointName}`, true);
+                    // Reset this specific joint
+                    if (jointData.limit) {
+                        // Reset to middle of range if limits exist
+                        const midPosition = (jointData.limit.upper + jointData.limit.lower) / 2;
+                        this.urdfReader.setJointPosition(jointName, midPosition);
+                        this.jointAnimator.resetJoint(jointName, jointObject, jointData);
+                    } else {
+                        // Reset to zero if no limits
+                        this.urdfReader.setJointPosition(jointName, 0);
+                        this.jointAnimator.resetJoint(jointName, jointObject, jointData);
+                    }
+                    this.updateJointAngleDisplay(jointName);
+                } catch (error) {
+                    this.logger.error(`Error resetting joint ${jointName}: ${error.message}`);
                 }
-                this.updateJointAngleDisplay(jointName);
             });
             
             jointButtonsDiv.appendChild(resetButton);
@@ -695,7 +950,12 @@ class URDFVisualizer {
             jointAngleDiv.id = `angle-${jointName}`;
             
             // Initialize with current angle
-            const currentAngle = this.urdfReader.getJointPosition(jointName) || 0;
+            let currentAngle = 0;
+            try {
+                currentAngle = this.urdfReader.getJointPosition(jointName) || 0;
+            } catch (error) {
+                this.logger.error(`Error getting initial joint position for ${jointName}: ${error.message}`);
+            }
             jointAngleDiv.textContent = `${(currentAngle * 180 / Math.PI).toFixed(2)}°`;
             
             jointControlDiv.appendChild(jointAngleDiv);
@@ -712,13 +972,58 @@ class URDFVisualizer {
                 slider.max = jointData.limit.upper * 180 / Math.PI;
                 slider.step = 0.1;
                 slider.value = currentAngle * 180 / Math.PI;
+                slider.dataset.jointName = jointName; // Store joint name in dataset
                 
                 slider.addEventListener('input', (event) => {
-                    const angleDeg = parseFloat(event.target.value);
-                    const angleRad = angleDeg * Math.PI / 180;
-                    this.urdfReader.setJointPosition(jointName, angleRad);
-                    this.jointAnimator.adjustJointAngle(jointName, 0); // Force update with current angle
-                    this.updateJointAngleDisplay(jointName);
+                    try {
+                        const angleDeg = parseFloat(event.target.value);
+                        const angleRad = angleDeg * Math.PI / 180;
+                        
+                        // Update the position in the URDF reader
+                        this.urdfReader.setJointPosition(jointName, angleRad);
+                        
+                        // Update the joint angle in the animator
+                        // Instead of using adjustJointAngle with 0, directly set the angle
+                        const jointObject = this.jointObjects.get(jointName);
+                        if (jointObject && jointData) {
+                            // Reset transformation
+                            jointObject.position.set(0, 0, 0);
+                            jointObject.quaternion.set(0, 0, 0, 1);
+                            jointObject.scale.set(1, 1, 1);
+                            
+                            // Apply original transform from URDF
+                            if (jointData.origin) {
+                                const xyz = jointData.origin.xyz || [0, 0, 0];
+                                const rpy = jointData.origin.rpy || [0, 0, 0];
+                                
+                                // Apply position
+                                jointObject.position.set(xyz[0], xyz[1], xyz[2]);
+                                
+                                // Apply original rotation
+                                const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
+                                jointObject.setRotationFromEuler(euler);
+                            }
+                            
+                            // Apply joint rotation around axis
+                            const axis = jointData.axis || [0, 0, 1];
+                            const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
+                            const rotQuat = new THREE.Quaternion();
+                            rotQuat.setFromAxisAngle(axisVec, angleRad);
+                            
+                            // Combine with existing rotation
+                            jointObject.quaternion.multiply(rotQuat);
+                            
+                            // Update the joint angle in the animator's internal state
+                            this.jointAnimator.jointAngles.set(jointName, angleRad);
+                        }
+                        
+                        // Update the angle display
+                        this.updateJointAngleDisplay(jointName);
+                        
+                        this.logger.debug(`Slider set joint ${jointName} to ${angleDeg.toFixed(2)}° (${angleRad.toFixed(4)} rad)`);
+                    } catch (error) {
+                        this.logger.error(`Error updating joint ${jointName} from slider: ${error.message}`);
+                    }
                 });
                 
                 sliderContainer.appendChild(slider);
@@ -728,6 +1033,11 @@ class URDFVisualizer {
             jointControlsContainer.appendChild(jointControlDiv);
         }
         
+        if (movableJointCount === 0) {
+            jointControlsContainer.innerHTML = '<p>No movable joints available to control</p>';
+            return;
+        }
+        
         // Add global reset button
         const globalResetDiv = document.createElement('div');
         globalResetDiv.className = 'global-reset';
@@ -735,15 +1045,20 @@ class URDFVisualizer {
         const globalResetButton = document.createElement('button');
         globalResetButton.textContent = 'Reset All Joints';
         globalResetButton.addEventListener('click', () => {
-            this.urdfReader.resetJointPositions();
-            this.jointAnimator.resetJointAngles();
-            this.updateAllJointAngleDisplays();
+            try {
+                this.logger.debug('Resetting all joints', true);
+                this.urdfReader.resetJointPositions();
+                this.jointAnimator.resetJointAngles();
+                this.updateAllJointAngleDisplays();
+            } catch (error) {
+                this.logger.error(`Error resetting all joints: ${error.message}`);
+            }
         });
         
         globalResetDiv.appendChild(globalResetButton);
         jointControlsContainer.appendChild(globalResetDiv);
         
-        this.logger.info('Joint control buttons created');
+        this.logger.info(`Joint control buttons created for ${movableJointCount} movable joints`);
         
         // Initialize all joint angle displays
         this.updateAllJointAngleDisplays();
@@ -755,41 +1070,46 @@ class URDFVisualizer {
      */
     updateJointAngleDisplay(jointName) {
         const angleDisplay = document.getElementById(`angle-${jointName}`);
-        if (angleDisplay) {
-            let currentAngle = 0;
-            
-            // Try to get the angle from the URDFReader first
-            try {
-                if (this.urdfReader && typeof this.urdfReader.getJointPosition === 'function') {
-                    const position = this.urdfReader.getJointPosition(jointName);
-                    if (position !== null) {
-                        currentAngle = position;
-                    }
-                } else if (this.jointAnimator) {
-                    // Fall back to the JointAnimator
-                    currentAngle = this.jointAnimator.getJointAngle(jointName);
+        if (!angleDisplay) {
+            this.logger.debug(`Angle display element not found for joint ${jointName}`);
+            return;
+        }
+        
+        let currentAngle = 0;
+        
+        // Try to get the angle from the URDFReader first
+        try {
+            if (this.urdfReader && typeof this.urdfReader.getJointPosition === 'function') {
+                const position = this.urdfReader.getJointPosition(jointName);
+                if (position !== null) {
+                    currentAngle = position;
                 }
-            } catch (error) {
-                this.logger.error(`Error getting joint angle for ${jointName}: ${error.message}`);
+            } else if (this.jointAnimator) {
                 // Fall back to the JointAnimator
-                if (this.jointAnimator) {
-                    currentAngle = this.jointAnimator.getJointAngle(jointName);
-                }
+                currentAngle = this.jointAnimator.getJointAngle(jointName);
             }
-            
-            angleDisplay.textContent = `${(currentAngle * 180 / Math.PI).toFixed(2)}°`;
-            
-            // Update slider if it exists
-            try {
-                // Use querySelector with a more specific selector that doesn't rely on :has
-                const slider = document.querySelector(`#angle-${jointName}`).closest('.joint-control').querySelector('.joint-slider');
+        } catch (error) {
+            this.logger.error(`Error getting joint angle for ${jointName}: ${error.message}`);
+            // Fall back to the JointAnimator
+            if (this.jointAnimator) {
+                currentAngle = this.jointAnimator.getJointAngle(jointName);
+            }
+        }
+        
+        angleDisplay.textContent = `${(currentAngle * 180 / Math.PI).toFixed(2)}°`;
+        
+        // Update slider if it exists
+        try {
+            const jointControl = document.querySelector(`[data-joint-name="${jointName}"]`);
+            if (jointControl) {
+                const slider = jointControl.querySelector('.joint-slider');
                 if (slider) {
                     slider.value = currentAngle * 180 / Math.PI;
                 }
-            } catch (error) {
-                // Silently ignore errors with finding the slider
-                this.logger.debug(`Could not update slider for joint ${jointName}: ${error.message}`);
             }
+        } catch (error) {
+            // Silently ignore errors with finding the slider
+            this.logger.debug(`Could not update slider for joint ${jointName}: ${error.message}`);
         }
     }
     
@@ -800,5 +1120,95 @@ class URDFVisualizer {
         for (const jointName of this.jointObjects.keys()) {
             this.updateJointAngleDisplay(jointName);
         }
+    }
+    
+    /**
+     * Creates a text sprite for labels in the 3D scene
+     * @param {string} message - The text to display
+     * @param {Object} parameters - Configuration parameters
+     * @returns {THREE.Sprite} - The text sprite
+     */
+    createTextSprite(message, parameters = {}) {
+        if (parameters === undefined) parameters = {};
+        
+        const fontface = parameters.fontface || 'Arial';
+        const fontsize = parameters.fontsize || 18;
+        const borderThickness = parameters.borderThickness || 2; // Reduced from 4 to 2
+        const borderColor = parameters.borderColor || { r:0, g:0, b:0, a:0.0 }; // Default to transparent border
+        const backgroundColor = parameters.backgroundColor || { r:255, g:255, b:255, a:0.7 }; // Default to semi-transparent
+        const textColor = parameters.textColor || { r:0, g:0, b:0, a:1.0 };
+        
+        // Create canvas
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        context.font = "Bold " + fontsize + "px " + fontface;
+        
+        // Get text metrics
+        const metrics = context.measureText(message);
+        const textWidth = metrics.width;
+        
+        // Set canvas dimensions - make it more compact
+        const padding = borderColor.a > 0 ? borderThickness : 1; // Minimal padding for small text
+        const width = textWidth + padding * 2;
+        const height = fontsize * 1.1 + padding * 2; // Reduce height ratio
+        canvas.width = width;
+        canvas.height = height;
+        
+        // Redraw with new canvas dimensions
+        context.font = "Bold " + fontsize + "px " + fontface;
+        context.fillStyle = "rgba("+backgroundColor.r+","+backgroundColor.g+","+backgroundColor.b+","+backgroundColor.a+")";
+        
+        // Only draw border if it's visible
+        if (borderColor.a > 0) {
+            context.strokeStyle = "rgba("+borderColor.r+","+borderColor.g+","+borderColor.b+","+borderColor.a+")";
+            context.lineWidth = borderThickness;
+            
+            // Draw rounded rectangle with border
+            this.roundRect(context, padding/2, padding/2, width - padding, height - padding, 2); // Smaller corner radius
+        } else {
+            // Just draw the background without border
+            this.roundRect(context, 0, 0, width, height, 2); // Smaller corner radius
+        }
+        
+        // Draw text
+        context.fillStyle = "rgba("+textColor.r+","+textColor.g+","+textColor.b+","+textColor.a+")";
+        context.fillText(message, padding, fontsize + padding/2); // Adjust text position
+        
+        // Create texture and sprite
+        const texture = new THREE.Texture(canvas);
+        texture.needsUpdate = true;
+        
+        const spriteMaterial = new THREE.SpriteMaterial({ 
+            map: texture,
+            transparent: true // Enable transparency
+        });
+        const sprite = new THREE.Sprite(spriteMaterial);
+        
+        return sprite;
+    }
+    
+    /**
+     * Helper function to draw a rounded rectangle on a canvas context
+     * @param {CanvasRenderingContext2D} ctx - The canvas context
+     * @param {number} x - X position
+     * @param {number} y - Y position
+     * @param {number} width - Width of the rectangle
+     * @param {number} height - Height of the rectangle
+     * @param {number} radius - Corner radius
+     */
+    roundRect(ctx, x, y, width, height, radius) {
+        ctx.beginPath();
+        ctx.moveTo(x + radius, y);
+        ctx.lineTo(x + width - radius, y);
+        ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+        ctx.lineTo(x + width, y + height - radius);
+        ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+        ctx.lineTo(x + radius, y + height);
+        ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+        ctx.lineTo(x, y + radius);
+        ctx.quadraticCurveTo(x, y, x + radius, y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
     }
 } 

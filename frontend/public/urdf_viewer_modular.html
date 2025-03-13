@@ -60,40 +60,174 @@
     <style>
         body {
             margin: 0;
-            padding: 20px;
+            padding: 0;
             font-family: Arial, sans-serif;
-            background-color: #f0f0f0;
-        }
-        .container {
-            display: flex;
-            gap: 20px;
-            height: calc(100vh - 40px);
-        }
-        .controls {
-            flex: 0 0 300px;
-            min-width: 300px;
-            max-width: 300px;
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+            height: 100vh;
             display: flex;
             flex-direction: column;
-            overflow-y: auto;
-            max-height: calc(100vh - 80px);
         }
-        #webgl-container {
+        
+        .container {
+            display: flex;
             flex: 1;
-            min-width: 0;
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             overflow: hidden;
         }
-        #treeStructure {
-            margin-top: 20px;
+        
+        .controls {
+            width: 300px;
+            padding: 15px;
+            background-color: #f0f0f0;
+            overflow-y: auto;
+            border-right: 1px solid #ccc;
+        }
+        
+        .control-group {
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .control-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        
+        .control-group select, 
+        .control-group button {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 5px;
+            box-sizing: border-box;
+        }
+        
+        #webgl-container {
+            flex: 1;
+            background-color: #f3f4f6;
+        }
+        
+        button {
+            background-color: #2196F3;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 14px;
+            transition: background-color 0.3s;
+        }
+        
+        button:hover {
+            background-color: #0b7dda;
+        }
+        
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        
+        #animateButton {
+            background-color: #2196F3;
+        }
+        
+        #debugConsole {
+            height: 200px;
+            overflow-y: auto;
+            background-color: #f9f9f9;
+            border-top: 1px solid #ccc;
             padding: 10px;
-            background: #f8f8f8;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        
+        .debug-message {
+            color: #aaaaaa;
+            font-style: italic;
+        }
+        
+        .info-message {
+            color: #2196F3;
+        }
+        
+        .success-message {
+            color: #4CAF50;
+        }
+        
+        .warning-message {
+            color: #FF9800;
+        }
+        
+        .error-message {
+            color: #F44336;
+        }
+        
+        #jointControls {
+            margin-top: 20px;
+            display: none;
+        }
+        
+        .joint-control {
+            margin-bottom: 15px;
+            padding: 10px;
+            background-color: #e9e9e9;
+            border-radius: 4px;
+        }
+        
+        .joint-name {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        .joint-limits {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        
+        .joint-buttons {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 5px;
+        }
+        
+        .joint-buttons button {
+            flex: 1;
+            padding: 5px;
+            font-size: 12px;
+        }
+        
+        .joint-angle {
+            text-align: center;
+            font-family: monospace;
+            margin: 5px 0;
+        }
+        
+        .slider-container {
+            padding: 5px 0;
+        }
+        
+        .joint-slider {
+            width: 100%;
+        }
+        
+        .global-reset {
+            margin-top: 20px;
+            text-align: center;
+        }
+        
+        .global-reset button {
+            background-color: #F44336;
+        }
+        
+        .global-reset button:hover {
+            background-color: #d32f2f;
+        }
+        
+        #treeStructure {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #f8f8f8;
             border-radius: 4px;
             font-family: monospace;
             font-size: 12px;
@@ -101,173 +235,35 @@
             word-break: break-all;
             overflow-y: auto;
             max-height: 200px;
-            flex-grow: 1;
         }
-        select {
-            width: 100%;
-            padding: 8px;
-            margin-bottom: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
-        }
-        button {
-            background: #4CAF50;
-            color: white;
-            padding: 8px 16px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            margin-top: 8px;
-            transition: background-color 0.3s;
-            font-size: 14px;
-        }
-        button:hover {
-            opacity: 0.9;
-        }
-        button:disabled {
-            background: #cccccc;
-            cursor: not-allowed;
-        }
-        #loadingStatus {
-            margin-top: 8px;
-            color: #666;
+        
+        #loadingStatus, #meshStatus, #animationStatus {
+            margin-top: 10px;
             font-size: 12px;
+            color: #666;
         }
+        
         #meshStatus {
-            margin-top: 8px;
             padding: 8px;
-            background: #f8f8f8;
+            background-color: #f8f8f8;
             border-radius: 4px;
             font-family: monospace;
-            font-size: 11px;
             white-space: pre-wrap;
             word-break: break-all;
             overflow-y: auto;
             max-height: 100px;
         }
-        #debugConsole {
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            height: 150px;
-            background: rgba(30, 30, 30, 0.95);
-            color: #00ff00;
-            font-family: monospace;
-            font-size: 11px;
-            padding: 8px;
-            overflow-y: auto;
-            z-index: 1000;
-            border-top: 2px solid #333;
-            display: block !important;
-            visibility: visible !important;
-        }
-        #debugConsole .timestamp {
-            color: #888;
-            margin-right: 8px;
-            font-size: 10px;
-        }
-        #debugConsole .error {
-            color: #ff4444;
-            font-weight: bold;
-        }
-        #debugConsole .warning {
-            color: #ffaa00;
-            font-weight: bold;
-        }
-        #debugConsole .success {
-            color: #44ff44;
-            font-weight: bold;
-        }
-        #debugConsole .info {
-            color: #00ff00;
-        }
-        #debugConsole .debug {
-            color: #aaaaaa;
-            font-style: italic;
-        }
-        h2 {
-            margin: 0 0 16px 0;
-            font-size: 18px;
-        }
-        .controls > div {
-            margin-bottom: 12px;
-        }
-        /* Styles for joint controls */
-        #jointControls {
-            margin-top: 20px;
-            padding: 10px;
-            background: #f8f8f8;
-            border-radius: 4px;
-            max-height: 300px;
-            overflow-y: auto;
-        }
-        .joint-control {
-            margin-bottom: 12px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid #ddd;
-            display: flex;
-            flex-direction: column;
-        }
-        .joint-name {
-            font-weight: bold;
-            margin-right: 10px;
-            font-size: 12px;
-            flex: 1;
-            min-width: 80px;
-        }
-        .joint-limits {
-            font-size: 11px;
-            color: #666;
-            margin-bottom: 5px;
-            font-style: italic;
-        }
-        .joint-buttons {
-            display: flex;
-            gap: 5px;
-            margin: 5px 0;
-        }
-        .joint-buttons button {
-            flex: 0 0 auto;
-            padding: 3px 6px;
-            margin-top: 0;
-            font-size: 11px;
-            min-width: 30px;
-        }
+        
         .decrement {
-            background-color: #f44336;
+            background-color: #F44336;
         }
+        
         .increment {
-            background-color: #2196F3;
+            background-color: #4CAF50;
         }
+        
         .reset {
-            background-color: #9e9e9e;
-        }
-        .joint-angle {
-            text-align: right;
-            margin-left: 8px;
-            font-size: 11px;
-            font-family: monospace;
-            min-width: 50px;
-        }
-        .slider-container {
-            margin-top: 5px;
-            width: 100%;
-        }
-        .joint-slider {
-            width: 100%;
-            margin: 0;
-        }
-        .global-reset {
-            margin-top: 15px;
-            text-align: center;
-            padding-top: 10px;
-            border-top: 1px solid #ddd;
-        }
-        .global-reset button {
-            background-color: #673ab7;
-            width: 100%;
+            background-color: #9E9E9E;
         }
     </style>
 </head>
@@ -275,13 +271,27 @@
     <div class="container">
         <div class="controls">
             <h2>URDF Viewer</h2>
-            <div>
+            <div class="control-group">
                 <label for="modelSelect">Select Robot Model:</label>
-                <select id="modelSelect">
-                    <option value="">Loading models...</option>
+                <select id="modelSelect"></select>
+                <button id="loadButton">Load Model</button>
+            </div>
+            
+            <div class="control-group">
+                <label for="colorSchemeSelect">Color Scheme:</label>
+                <select id="colorSchemeSelect">
+                    <option value="0">Vibrant</option>
+                    <option value="1">Pastel</option>
+                    <option value="2">Blue to Red</option>
+                    <option value="3">Grayscale</option>
+                    <option value="4">Rainbow</option>
                 </select>
             </div>
-            <button id="loadButton">Load Model</button>
+            
+            <div class="control-group">
+                <button id="animateButton">Animate Joints</button>
+            </div>
+            
             <div id="loadingStatus"></div>
             <div id="meshStatus"></div>
             
@@ -293,7 +303,6 @@
             
             <div id="treeStructure"></div>
             <div>
-                <button id="animateButton" style="background: #2196F3;">Animate Joints</button>
                 <div id="animationStatus"></div>
             </div>
         </div>

@@ -42,9 +42,12 @@ class JointAnimator {
      * @param {Map} jointData - Map of joint names to joint data from URDF
      */
     setJoints(jointObjects, jointData) {
-        this.jointObjects = jointObjects;
-        this.jointData = jointData;
+        this.jointObjects = jointObjects || new Map();
+        this.jointData = jointData || new Map();
         this.jointAngles = new Map();
+        
+        // Log the number of joints being set
+        this.logger.debug(`Setting ${this.jointObjects.size} joints for animation`, true);
         
         // Initialize joint angles
         for (const jointName of this.jointObjects.keys()) {
@@ -56,6 +59,7 @@ class JointAnimator {
                     const position = this.urdfReader.getJointPosition(jointName);
                     if (position !== null) {
                         this.jointAngles.set(jointName, position);
+                        this.logger.debug(`Initialized joint ${jointName} to position ${position.toFixed(4)}`);
                     }
                 } catch (error) {
                     this.logger.error(`Error getting joint position for ${jointName}: ${error.message}`);
@@ -314,11 +318,24 @@ class JointAnimator {
      * Adjusts a joint angle manually
      * @param {string} jointName - The name of the joint to adjust
      * @param {number} deltaAngle - The angle change in radians
+     * @returns {number|null} - The new angle or null if adjustment failed
      */
     adjustJointAngle(jointName, deltaAngle) {
+        // Validate inputs
+        if (!jointName) {
+            this.logger.error("Cannot adjust joint: jointName is undefined or empty");
+            return null;
+        }
+        
+        if (typeof deltaAngle !== 'number' || isNaN(deltaAngle)) {
+            this.logger.error(`Cannot adjust joint ${jointName}: deltaAngle must be a number, got ${typeof deltaAngle}`);
+            return null;
+        }
+        
+        // Check if joint exists
         if (!this.jointObjects.has(jointName)) {
-            this.logger.warning(`Joint ${jointName} not found`);
-            return;
+            this.logger.warning(`Joint ${jointName} not found in jointObjects map`);
+            return null;
         }
         
         // Stop animation if it's running
@@ -326,30 +343,39 @@ class JointAnimator {
             this.stopAnimation();
         }
         
+        // Get joint object and data
         const jointObject = this.jointObjects.get(jointName);
         const jointData = this.jointData.get(jointName);
         
-        if (!jointObject || !jointData) {
+        if (!jointObject) {
+            this.logger.warning(`Joint object not found for ${jointName}`);
+            return null;
+        }
+        
+        if (!jointData) {
             this.logger.warning(`Joint data not found for ${jointName}`);
-            return;
+            return null;
         }
         
         // Skip fixed joints
         if (jointData.type === 'fixed') {
             this.logger.warning(`Cannot adjust fixed joint ${jointName}`);
-            return;
+            return null;
         }
         
         // Get current angle and update it
         let currentAngle = this.jointAngles.get(jointName) || 0;
         let newAngle = currentAngle + deltaAngle;
         
+        this.logger.debug(`Adjusting joint ${jointName} from ${(currentAngle * 180 / Math.PI).toFixed(2)}° to ${(newAngle * 180 / Math.PI).toFixed(2)}° (delta: ${(deltaAngle * 180 / Math.PI).toFixed(2)}°)`, true);
+        
         // Apply joint limits
+        let originalNewAngle = newAngle;
         if (jointData.limit) {
             newAngle = Math.max(jointData.limit.lower, Math.min(jointData.limit.upper, newAngle));
             
             // Log if the angle was limited
-            if (newAngle !== currentAngle + deltaAngle) {
+            if (newAngle !== originalNewAngle) {
                 this.logger.warning(`Joint ${jointName} angle limited to ${(newAngle * 180 / Math.PI).toFixed(2)}° (limits: ${(jointData.limit.lower * 180 / Math.PI).toFixed(2)}° to ${(jointData.limit.upper * 180 / Math.PI).toFixed(2)}°)`);
             }
         } else {
@@ -357,42 +383,48 @@ class JointAnimator {
             const actualAngle = this._safeSetJointPosition(jointName, newAngle);
             if (actualAngle !== newAngle) {
                 newAngle = actualAngle;
+                this.logger.debug(`Joint ${jointName} angle adjusted by URDF reader to ${(newAngle * 180 / Math.PI).toFixed(2)}°`);
             }
         }
         
         // Store the current angle
         this.jointAngles.set(jointName, newAngle);
         
-        // Get the joint's axis of rotation
-        const axis = jointData.axis || [0, 0, 1];
-        
-        // Reset transformation
-        jointObject.position.set(0, 0, 0);
-        jointObject.quaternion.set(0, 0, 0, 1);
-        jointObject.scale.set(1, 1, 1);
-        
-        // Apply original transform from URDF
-        if (jointData.origin) {
-            const xyz = jointData.origin.xyz || [0, 0, 0];
-            const rpy = jointData.origin.rpy || [0, 0, 0];
+        try {
+            // Get the joint's axis of rotation
+            const axis = jointData.axis || [0, 0, 1];
             
-            // Apply position
-            jointObject.position.set(xyz[0], xyz[1], xyz[2]);
+            // Reset transformation
+            jointObject.position.set(0, 0, 0);
+            jointObject.quaternion.set(0, 0, 0, 1);
+            jointObject.scale.set(1, 1, 1);
             
-            // Apply original rotation
-            const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
-            jointObject.setRotationFromEuler(euler);
+            // Apply original transform from URDF
+            if (jointData.origin) {
+                const xyz = jointData.origin.xyz || [0, 0, 0];
+                const rpy = jointData.origin.rpy || [0, 0, 0];
+                
+                // Apply position
+                jointObject.position.set(xyz[0], xyz[1], xyz[2]);
+                
+                // Apply original rotation
+                const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
+                jointObject.setRotationFromEuler(euler);
+            }
+            
+            // Apply joint rotation around axis
+            const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
+            const rotQuat = new THREE.Quaternion();
+            rotQuat.setFromAxisAngle(axisVec, newAngle);
+            
+            // Combine with existing rotation
+            jointObject.quaternion.multiply(rotQuat);
+            
+            this.logger.info(`Joint ${jointName} angle adjusted to: ${(newAngle * 180 / Math.PI).toFixed(2)}° around axis [${axis.join(', ')}]`);
+        } catch (error) {
+            this.logger.error(`Error applying rotation to joint ${jointName}: ${error.message}`);
+            // Continue execution - we've already updated the angle in our internal state
         }
-        
-        // Apply joint rotation around axis
-        const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
-        const rotQuat = new THREE.Quaternion();
-        rotQuat.setFromAxisAngle(axisVec, newAngle);
-        
-        // Combine with existing rotation
-        jointObject.quaternion.multiply(rotQuat);
-        
-        this.logger.info(`Joint ${jointName} angle adjusted to: ${(newAngle * 180 / Math.PI).toFixed(2)}° around axis [${axis.join(', ')}]`);
         
         return newAngle;
     }
