@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>URDF Tree Structure</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        .tree-structure {
+            font-family: monospace;
+            white-space: pre;
+        }
+        .joint-type {
+            color: #2563eb;
+            font-weight: 500;
+        }
+        .link-name {
+            color: #059669;
+            font-weight: 500;
+        }
+        .geometry {
+            color: #7c3aed;
+        }
+        .origin {
+            color: #dc2626;
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-4xl font-bold text-center mb-8">URDF Tree Structure</h1>
+        
+        <!-- Model Selection -->
+        <div class="max-w-md mx-auto bg-white rounded-lg shadow-md p-6 mb-6">
+            <div class="space-y-4">
+                <div>
+                    <label for="modelSelect" class="block text-sm font-medium text-gray-700">Select Robot Model</label>
+                    <select id="modelSelect" 
+                            class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                        <option value="">Loading models...</option>
+                    </select>
+                </div>
+                <button id="loadButton"
+                        class="w-full bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">
+                    Load Model
+                </button>
+            </div>
+            <div id="loadingStatus" class="mt-4 text-sm text-gray-600"></div>
+        </div>
+
+        <!-- Tree Structure Display -->
+        <div class="max-w-4xl mx-auto bg-white rounded-lg shadow-md p-6">
+            <h2 class="text-2xl font-bold mb-4">Robot Structure</h2>
+            <div id="treeStructure" class="tree-structure bg-gray-50 p-4 rounded-lg overflow-x-auto"></div>
+        </div>
+    </div>
+
+    <script>
+        class URDFReader {
+            constructor() {
+                this.robot = {
+                    name: '',
+                    links: new Map(),
+                    joints: new Map(),
+                    rootLinks: [],
+                    tree: new Map()
+                };
+            }
+
+            async loadModelFromFile(filename) {
+                try {
+                    const timestamp = new Date().getTime();
+                    const response = await fetch(`/public/models/${filename}?t=${timestamp}`);
+                    if (!response.ok) {
+                        throw new Error(`Failed to load URDF file: ${filename}`);
+                    }
+                    const urdfText = await response.text();
+                    return this.parse(urdfText);
+                } catch (error) {
+                    console.error('Error loading URDF:', error);
+                    throw error;
+                }
+            }
+
+            parseOrigin(element) {
+                const origin = element?.getElementsByTagName('origin')[0];
+                if (!origin) return { xyz: [0, 0, 0], rpy: [0, 0, 0] };
+                
+                return {
+                    xyz: (origin.getAttribute('xyz') || '0 0 0').split(' ').map(Number),
+                    rpy: (origin.getAttribute('rpy') || '0 0 0').split(' ').map(Number)
+                };
+            }
+
+            parseGeometry(element) {
+                const geometry = element?.getElementsByTagName('geometry')[0];
+                if (!geometry) return null;
+
+                const geometryType = geometry.children[0];
+                if (!geometryType) return null;
+
+                switch (geometryType.tagName) {
+                    case 'mesh':
+                        return {
+                            type: 'mesh',
+                            filename: geometryType.getAttribute('filename'),
+                            scale: (geometryType.getAttribute('scale') || '1 1 1').split(' ').map(Number)
+                        };
+                    case 'box':
+                        return {
+                            type: 'box',
+                            size: geometryType.getAttribute('size')?.split(' ').map(Number)
+                        };
+                    case 'cylinder':
+                        return {
+                            type: 'cylinder',
+                            radius: parseFloat(geometryType.getAttribute('radius')),
+                            length: parseFloat(geometryType.getAttribute('length'))
+                        };
+                    case 'sphere':
+                        return {
+                            type: 'sphere',
+                            radius: parseFloat(geometryType.getAttribute('radius'))
+                        };
+                }
+                return null;
+            }
+
+            parse(urdfText) {
+                this.robot = {
+                    name: '',
+                    links: new Map(),
+                    joints: new Map(),
+                    rootLinks: [],
+                    tree: new Map()
+                };
+
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(urdfText, 'text/xml');
+                const robot = doc.getElementsByTagName('robot')[0];
+                
+                if (!robot) {
+                    throw new Error('No robot element found in URDF');
+                }
+
+                this.robot.name = robot.getAttribute('name') || 'unnamed_robot';
+
+                // Parse links
+                const links = robot.getElementsByTagName('link');
+                for (const link of links) {
+                    const name = link.getAttribute('name');
+                    if (!name) continue;
+
+                    const visual = link.getElementsByTagName('visual')[0];
+                    const collision = link.getElementsByTagName('collision')[0];
+                    const inertial = link.getElementsByTagName('inertial')[0];
+
+                    this.robot.links.set(name, {
+                        name,
+                        visual: visual ? {
+                            origin: this.parseOrigin(visual),
+                            geometry: this.parseGeometry(visual)
+                        } : null,
+                        collision: collision ? {
+                            origin: this.parseOrigin(collision),
+                            geometry: this.parseGeometry(collision)
+                        } : null,
+                        inertial: inertial ? {
+                            mass: parseFloat(inertial.getElementsByTagName('mass')[0]?.getAttribute('value')),
+                            origin: this.parseOrigin(inertial)
+                        } : null
+                    });
+                }
+
+                // Parse joints
+                const joints = robot.getElementsByTagName('joint');
+                for (const joint of joints) {
+                    const name = joint.getAttribute('name');
+                    const type = joint.getAttribute('type');
+                    const parent = joint.getElementsByTagName('parent')[0]?.getAttribute('link');
+                    const child = joint.getElementsByTagName('child')[0]?.getAttribute('link');
+                    const axis = joint.getElementsByTagName('axis')[0]?.getAttribute('xyz')?.split(' ').map(Number);
+                    const origin = this.parseOrigin(joint);
+
+                    if (name && type && parent && child) {
+                        this.robot.joints.set(name, {
+                            name, type, parent, child,
+                            axis: axis || [1, 0, 0],
+                            origin
+                        });
+                    }
+                }
+
+                this.buildTree();
+                return this.robot;
+            }
+
+            buildTree() {
+                const childLinks = new Set();
+                for (const joint of this.robot.joints.values()) {
+                    childLinks.add(joint.child);
+                }
+
+                this.robot.rootLinks = Array.from(this.robot.links.keys())
+                    .filter(link => !childLinks.has(link));
+
+                for (const [jointName, joint] of this.robot.joints) {
+                    if (!this.robot.tree.has(joint.parent)) {
+                        this.robot.tree.set(joint.parent, []);
+                    }
+                    this.robot.tree.get(joint.parent).push({
+                        joint: jointName,
+                        child: joint.child
+                    });
+                }
+            }
+
+            formatVector(vec) {
+                return `[${vec.map(v => v.toFixed(3)).join(', ')}]`;
+            }
+
+            displayTreeStructure() {
+                let output = `Robot: ${this.robot.name}\n\n`;
+                
+                const displayNode = (linkName, level = 0, isLast = true) => {
+                    const prefix = level === 0 ? '' : '│   '.repeat(level - 1) + (isLast ? '└── ' : '├── ');
+                    const link = this.robot.links.get(linkName);
+                    
+                    // Link information
+                    output += `${prefix}<span class="link-name">${linkName}</span>\n`;
+                    if (link.visual?.geometry) {
+                        output += `${prefix}    <span class="geometry">Geometry: ${link.visual.geometry.type}</span>\n`;
+                        if (link.visual.geometry.filename) {
+                            output += `${prefix}    <span class="geometry">Mesh: ${link.visual.geometry.filename}</span>\n`;
+                        }
+                    }
+                    if (link.visual?.origin) {
+                        output += `${prefix}    <span class="origin">Origin: xyz=${this.formatVector(link.visual.origin.xyz)} rpy=${this.formatVector(link.visual.origin.rpy)}</span>\n`;
+                    }
+
+                    // Joint and children information
+                    const children = this.robot.tree.get(linkName) || [];
+                    for (let i = 0; i < children.length; i++) {
+                        const child = children[i];
+                        const isLastChild = i === children.length - 1;
+                        const joint = this.robot.joints.get(child.joint);
+                        
+                        output += `${prefix}${isLast ? '    ' : '│   '}Joint: <span class="joint-type">${child.joint} (${joint.type})</span>\n`;
+                        if (joint.axis) {
+                            output += `${prefix}${isLast ? '    ' : '│   '}Axis: <span class="joint-type">${this.formatVector(joint.axis)}</span>\n`;
+                        }
+                        if (joint.origin) {
+                            output += `${prefix}${isLast ? '    ' : '│   '}Origin: <span class="origin">xyz=${this.formatVector(joint.origin.xyz)} rpy=${this.formatVector(joint.origin.rpy)}</span>\n`;
+                        }
+                        
+                        displayNode(child.child, level + 1, isLastChild);
+                    }
+                };
+
+                for (const rootLink of this.robot.rootLinks) {
+                    displayNode(rootLink);
+                }
+
+                return output;
+            }
+        }
+
+        const urdfReader = new URDFReader();
+
+        async function loadAvailableModels() {
+            try {
+                const timestamp = new Date().getTime();
+                const response = await fetch(`/api/models?t=${timestamp}`);
+                const models = await response.json();
+                const select = document.getElementById('modelSelect');
+                select.innerHTML = '<option value="">Select a model...</option>';
+                models.forEach(model => {
+                    const option = document.createElement('option');
+                    option.value = model.urdf;  // Just the filename
+                    option.textContent = model.name;
+                    select.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Error loading models:', error);
+                document.getElementById('loadingStatus').textContent = 'Error loading models list';
+            }
+        }
+
+        async function loadSelectedModel() {
+            const modelFile = document.getElementById('modelSelect').value;
+            if (!modelFile) {
+                alert('Please select a model first');
+                return;
+            }
+
+            const loadingStatus = document.getElementById('loadingStatus');
+            const loadButton = document.getElementById('loadButton');
+            const treeStructure = document.getElementById('treeStructure');
+            
+            try {
+                loadingStatus.textContent = 'Loading URDF...';
+                loadButton.disabled = true;
+
+                const robotData = await urdfReader.loadModelFromFile(modelFile);
+                treeStructure.innerHTML = urdfReader.displayTreeStructure();
+                loadingStatus.textContent = 'Model loaded successfully';
+            } catch (error) {
+                console.error('Error:', error);
+                loadingStatus.textContent = 'Error loading model: ' + error.message;
+            } finally {
+                loadButton.disabled = false;
+            }
+        }
+
+        // Setup event listeners
+        document.getElementById('loadButton').addEventListener('click', loadSelectedModel);
+
+        // Load available models when page loads
+        loadAvailableModels();
+    </script>
+</body>
+</html> 
