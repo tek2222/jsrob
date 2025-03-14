@@ -167,6 +167,21 @@
         .slider-container input {
             width: 100%;
         }
+        .checkbox-container {
+            margin-top: 10px;
+            margin-bottom: 10px;
+        }
+        .checkbox-container label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+        }
+        .checkbox-container input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
@@ -184,6 +199,12 @@
                 <label for="speedSlider">Exploration Speed (samples/frame):</label>
                 <input type="range" id="speedSlider" min="1" max="100" value="10">
                 <span id="speedValue">10</span>
+            </div>
+            <div class="checkbox-container">
+                <label>
+                    <input type="checkbox" id="showFKPoints" checked>
+                    Show FK Points
+                </label>
             </div>
             <div>
                 <button id="toggleExploration">Start Exploration</button>
@@ -236,6 +257,7 @@
                 this.colladaLoader = null;
                 this.fkPoints = null;
                 this.endEffectorName = null; // Will store the name of the last link
+                this.showFKPoints = true; // New property to track FK points visibility
 
                 this.init();
                 this.setupEventListeners();
@@ -327,6 +349,15 @@
                     this.samplesPerFrame = parseInt(speedSlider.value);
                     speedValue.textContent = this.samplesPerFrame;
                 });
+
+                // FK Points visibility checkbox
+                const showFKPointsCheckbox = document.getElementById('showFKPoints');
+                showFKPointsCheckbox.addEventListener('change', () => {
+                    this.showFKPoints = showFKPointsCheckbox.checked;
+                    if (this.fkPoints) {
+                        this.fkPoints.visible = this.showFKPoints;
+                    }
+                });
             }
 
             onWindowResize() {
@@ -356,9 +387,11 @@
             randomizePose() {
                 if (!this.urdfReader || !this.jointObjects) return;
 
-                const movableJoints = this.urdfReader.getMovableJoints();
-                this.logger.info(`Processing ${movableJoints.size} movable joints`);
-                
+                // Debug available joints
+                const allJoints = this.urdfReader.robot.joints;
+                this.logger.info(`Available joints in URDF: ${Array.from(allJoints.keys()).join(', ')}`);
+                this.logger.info(`Available joint objects in scene: ${Array.from(this.jointObjects.keys()).join(', ')}`);
+
                 // Store initial positions for debugging
                 if (this.endEffectorName) {
                     const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
@@ -372,19 +405,15 @@
                 // Track if any joint was actually moved
                 let jointsUpdated = false;
                 
-                for (const [jointName, jointInfo] of movableJoints) {
-                    if (!jointInfo) {
-                        this.logger.warning(`No joint info for joint: ${jointName}`);
+                // Iterate through all joints in the URDF
+                for (const [jointName, jointData] of this.urdfReader.robot.joints) {
+                    // Skip non-movable joints
+                    if (jointData.type !== 'revolute' && jointData.type !== 'prismatic') {
+                        this.logger.info(`Skipping non-movable joint ${jointName} of type ${jointData.type}`);
                         continue;
                     }
 
-                    // Skip fixed joints
-                    if (jointInfo.type !== 'revolute' && jointInfo.type !== 'prismatic') {
-                        this.logger.info(`Skipping non-movable joint ${jointName} of type ${jointInfo.type}`);
-                        continue;
-                    }
-
-                    this.logger.info(`Processing joint: ${jointName}, type: ${jointInfo.type}, limits: ${JSON.stringify(jointInfo.limits)}`);
+                    this.logger.info(`Processing joint: ${jointName}, type: ${jointData.type}, limits: ${JSON.stringify(jointData.limits)}`);
                     
                     // Default limits for joints without defined limits
                     const defaultLower = -Math.PI;  // -180 degrees
@@ -394,9 +423,9 @@
                     let upper = defaultUpper;
                     
                     // Only try to access limits if they exist
-                    if (jointInfo.limits) {
-                        lower = typeof jointInfo.limits.lower === 'number' ? jointInfo.limits.lower : defaultLower;
-                        upper = typeof jointInfo.limits.upper === 'number' ? jointInfo.limits.upper : defaultUpper;
+                    if (jointData.limits) {
+                        lower = typeof jointData.limits.lower === 'number' ? jointData.limits.lower : defaultLower;
+                        upper = typeof jointData.limits.upper === 'number' ? jointData.limits.upper : defaultUpper;
                     }
                     
                     // Generate random angle within joint limits
@@ -415,7 +444,6 @@
                             jointObject.quaternion.set(0, 0, 0, 1);
                             
                             // Apply original transform from URDF
-                            const jointData = this.urdfReader.robot.joints.get(jointName);
                             if (jointData.origin) {
                                 const xyz = jointData.origin.xyz || [0, 0, 0];
                                 const rpy = jointData.origin.rpy || [0, 0, 0];
@@ -487,6 +515,9 @@
             }
 
             addFKPoint(position) {
+                // Only add points if visualization is enabled
+                if (!this.showFKPoints) return;
+
                 // Log the coordinates to debug console
                 this.logger.info(`FK Position: x=${position.x.toFixed(3)}, y=${position.y.toFixed(3)}, z=${position.z.toFixed(3)}`);
 
