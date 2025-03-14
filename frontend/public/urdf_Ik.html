@@ -224,6 +224,11 @@
                 <input type="range" id="speedSlider" min="1" max="500" value="50">
                 <span id="speedValue">50</span>
             </div>
+            <div class="slider-container">
+                <label for="perturbationSlider">Perturbation Range (degrees):</label>
+                <input type="range" id="perturbationSlider" min="1" max="180" value="10">
+                <span id="perturbationValue">10</span>
+            </div>
             <div class="checkbox-container">
                 <label>
                     <input type="checkbox" id="showFKPoints" checked>
@@ -283,6 +288,7 @@
                 this.urdfReader = null;
                 this.isExploring = false;
                 this.samplesPerFrame = 10;
+                this.perturbationRange = 10; // Default perturbation range in degrees
                 this.controls = null;
                 this.stlLoader = null;
                 this.colladaLoader = null;
@@ -419,6 +425,14 @@
                     speedValue.textContent = this.samplesPerFrame;
                 });
 
+                // Perturbation slider
+                const perturbationSlider = document.getElementById('perturbationSlider');
+                const perturbationValue = document.getElementById('perturbationValue');
+                perturbationSlider.addEventListener('input', () => {
+                    this.perturbationRange = parseInt(perturbationSlider.value);
+                    perturbationValue.textContent = this.perturbationRange;
+                });
+
                 // FK Points visibility checkbox
                 const showFKPointsCheckbox = document.getElementById('showFKPoints');
                 showFKPointsCheckbox.addEventListener('change', () => {
@@ -479,7 +493,6 @@
 
                 // Re-evaluate current solution against new target position
                 if (this.isExploring && this.urdfReader && this.endEffectorName && this.robotModel) {
-                    // Always re-evaluate current best solution against new target position
                     const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
                     if (endEffectorObject) {
                         const worldPos = new THREE.Vector3();
@@ -498,11 +511,22 @@
                             }
                             this.bestJointAngles = new Map(this.currentJointAngles);
                         }
-                    }
 
-                    // Perform IK iterations
-                    for (let i = 0; i < this.samplesPerFrame; i++) {
-                        this.randomizePose();
+                        // Store the best configuration before exploration
+                        const bestConfig = new Map(this.bestJointAngles);
+                        const bestDist = this.bestDistance;
+
+                        // Perform IK iterations
+                        for (let i = 0; i < this.samplesPerFrame; i++) {
+                            this.randomizePose();
+                        }
+
+                        // If no better solution was found, restore the best configuration
+                        if (this.bestDistance >= bestDist) {
+                            this.bestDistance = bestDist;
+                            this.bestJointAngles = bestConfig;
+                            this.applyConfiguration(this.bestJointAngles);
+                        }
                     }
                 }
 
@@ -523,7 +547,32 @@
                 const targetPos = new THREE.Vector3();
                 this.targetPose.getWorldPosition(targetPos);
                 
-                return endEffectorPos.distanceTo(targetPos);
+                // Calculate position difference
+                const positionDistance = endEffectorPos.distanceTo(targetPos);
+                
+                // Calculate rotation difference
+                const endEffectorQuat = new THREE.Quaternion();
+                const targetQuat = new THREE.Quaternion();
+                
+                // Get world quaternions
+                this.targetPose.getWorldQuaternion(targetQuat);
+                const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
+                if (endEffectorObject) {
+                    endEffectorObject.getWorldQuaternion(endEffectorQuat);
+                }
+                
+                // Calculate angle between quaternions (in radians)
+                const dotProduct = Math.abs(endEffectorQuat.dot(targetQuat));
+                const rotationDistance = Math.acos(Math.min(1, Math.max(-1, 2 * dotProduct * dotProduct - 1)));
+                
+                // Weight factors for position and rotation
+                const positionWeight = 1.0;
+                const rotationWeight = 0.5; // Adjust this to change the importance of rotation vs position
+                
+                // Combined weighted cost
+                const totalCost = (positionWeight * positionDistance) + (rotationWeight * rotationDistance);
+                
+                return totalCost;
             }
 
             setBestSolution() {
@@ -590,7 +639,7 @@
                 // Log stats every second
                 const now = Date.now();
                 if (now - this.lastLogTime >= 1000) {
-                    this.logger.info(`Total FK calculations: ${this.totalFKCalculations}, Current rate: ${this.samplesPerFrame} samples/frame, Best distance: ${this.bestDistance.toFixed(4)}`);
+                    this.logger.info(`Total FK calculations: ${this.totalFKCalculations}, Current rate: ${this.samplesPerFrame} samples/frame, Best distance: ${this.bestDistance.toFixed(4)}, Perturbation range: ±${this.perturbationRange}°`);
                     this.lastLogTime = now;
                 }
 
@@ -603,12 +652,12 @@
                 }
 
                 // Try a random configuration
-                const perturbationRange = (10 * Math.PI) / 180; // ±10 degrees in radians
+                const perturbationRadians = (this.perturbationRange * Math.PI) / 180; // Convert degrees to radians
                 for (const [jointName, jointData] of this.urdfReader.robot.joints) {
                     if (jointData.type !== 'revolute' && jointData.type !== 'prismatic') continue;
                     
                     const currentAngle = previousAngles.get(jointName);
-                    const perturbation = (Math.random() * 2 - 1) * perturbationRange;
+                    const perturbation = (Math.random() * 2 - 1) * perturbationRadians;
                     let newAngle = currentAngle + perturbation;
                     
                     if (jointData.limits) {
@@ -678,37 +727,7 @@
                             this.logger.success(`Found better solution! Distance: ${distance.toFixed(4)}`);
                         } else {
                             // Restore previous configuration if not better
-                            for (const [jointName, angle] of previousAngles) {
-                                this.urdfReader.setJointPosition(jointName, angle);
-                                const jointObject = this.jointObjects.get(jointName);
-                                if (jointObject) {
-                                    const jointData = this.urdfReader.robot.joints.get(jointName);
-                                    
-                                    jointObject.position.set(0, 0, 0);
-                                    jointObject.quaternion.set(0, 0, 0, 1);
-                                    
-                                    if (jointData.origin) {
-                                        const xyz = jointData.origin.xyz || [0, 0, 0];
-                                        const rpy = jointData.origin.rpy || [0, 0, 0];
-                                        jointObject.position.set(xyz[0], xyz[1], xyz[2]);
-                                        const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
-                                        jointObject.setRotationFromEuler(euler);
-                                    }
-                                    
-                                    const axis = jointData.axis || [0, 0, 1];
-                                    const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
-                                    const rotQuat = new THREE.Quaternion();
-                                    rotQuat.setFromAxisAngle(axisVec, angle);
-                                    jointObject.quaternion.multiply(rotQuat);
-
-                                    jointObject.updateMatrix();
-                                    jointObject.updateMatrixWorld(true);
-                                }
-                            }
-                            // Update robot's world matrix after restoring
-                            if (this.robotModel) {
-                                this.robotModel.updateMatrixWorld(true);
-                            }
+                            this.applyConfiguration(previousAngles);
                         }
                     }
                 }
