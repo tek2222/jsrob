@@ -1194,6 +1194,78 @@
                 this.transformControls.setMode('translate'); // Start in translate mode
                 this.transformControls.setSize(0.8); // Make handles slightly smaller
             }
+
+            calculateFK(jointAngles) {
+                // Create temporary transforms to compute FK without affecting visualization
+                const transforms = new Map();
+                
+                // Initialize transforms for each joint
+                for (const [jointName, jointData] of this.urdfReader.robot.joints) {
+                    transforms.set(jointName, new THREE.Matrix4());
+                }
+                
+                // Compute transforms in order from root to tip
+                for (const [jointName, jointData] of this.urdfReader.robot.joints) {
+                    const transform = transforms.get(jointName);
+                    
+                    // Apply joint origin transform
+                    if (jointData.origin) {
+                        const xyz = jointData.origin.xyz || [0, 0, 0];
+                        const rpy = jointData.origin.rpy || [0, 0, 0];
+                        
+                        const position = new THREE.Vector3(xyz[0], xyz[1], xyz[2]);
+                        const quaternion = new THREE.Quaternion().setFromEuler(
+                            new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ')
+                        );
+                        
+                        transform.compose(position, quaternion, new THREE.Vector3(1, 1, 1));
+                    }
+                    
+                    // Apply joint angle for revolute/prismatic joints
+                    if ((jointData.type === 'revolute' || jointData.type === 'prismatic') && jointAngles.has(jointName)) {
+                        const angle = jointAngles.get(jointName);
+                        const axis = jointData.axis || [0, 0, 1];
+                        const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
+                        const rotMatrix = new THREE.Matrix4();
+                        
+                        if (jointData.type === 'revolute') {
+                            rotMatrix.makeRotationAxis(axisVec, angle);
+                        } else {
+                            // For prismatic joints, translate along axis
+                            rotMatrix.makeTranslation(
+                                axisVec.x * angle,
+                                axisVec.y * angle,
+                                axisVec.z * angle
+                            );
+                        }
+                        
+                        transform.multiply(rotMatrix);
+                    }
+                    
+                    // Accumulate parent transform
+                    if (jointData.parent && transforms.has(jointData.parent)) {
+                        const parentTransform = transforms.get(jointData.parent);
+                        transform.premultiply(parentTransform);
+                    }
+                }
+                
+                // Return end effector position and orientation
+                if (this.endEffectorName) {
+                    const endEffectorTransform = transforms.get(this.endEffectorName);
+                    const position = new THREE.Vector3();
+                    const quaternion = new THREE.Quaternion();
+                    const scale = new THREE.Vector3();
+                    
+                    endEffectorTransform.decompose(position, quaternion, scale);
+                    
+                    return {
+                        position: position,
+                        orientation: quaternion
+                    };
+                }
+                
+                return null;
+            }
         }
     </script>
 </body>
