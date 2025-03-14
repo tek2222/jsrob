@@ -357,6 +357,25 @@
                 this.transformControls.addEventListener('dragging-changed', (event) => {
                     this.controls.enabled = !event.value;
                 });
+                // Add change handler to update distance when target is moved
+                this.transformControls.addEventListener('change', () => {
+                    if (this.endEffectorName && this.robotModel) {
+                        const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
+                        if (endEffectorObject) {
+                            const worldPos = new THREE.Vector3();
+                            endEffectorObject.getWorldPosition(worldPos);
+                            const distance = this.calculatePositionCost(worldPos);
+                            // Update best distance if this configuration is better
+                            if (distance < this.bestDistance) {
+                                this.bestDistance = distance;
+                                this.setBestSolution();
+                                this.logger.success(`New best distance after target move: ${distance.toFixed(4)}`);
+                            }
+                            // Log current distance regardless
+                            this.logger.info(`Current distance to target: ${distance.toFixed(4)}`);
+                        }
+                    }
+                });
                 this.scene.add(this.transformControls);
 
                 // Create target pose
@@ -458,8 +477,30 @@
                     this.controls.update();
                 }
 
-                if (this.isExploring && this.urdfReader) {
-                    // Perform random FK evaluations
+                // Re-evaluate current solution against new target position
+                if (this.isExploring && this.urdfReader && this.endEffectorName && this.robotModel) {
+                    // Always re-evaluate current best solution against new target position
+                    const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
+                    if (endEffectorObject) {
+                        const worldPos = new THREE.Vector3();
+                        endEffectorObject.getWorldPosition(worldPos);
+                        const currentDistance = this.calculatePositionCost(worldPos);
+                        
+                        // Reset best distance if target has moved significantly
+                        if (Math.abs(currentDistance - this.bestDistance) > 0.001) {
+                            this.bestDistance = currentDistance;
+                            // Store current configuration as our starting point
+                            this.currentJointAngles = new Map();
+                            for (const [jointName, jointData] of this.urdfReader.robot.joints) {
+                                if (jointData.type === 'revolute' || jointData.type === 'prismatic') {
+                                    this.currentJointAngles.set(jointName, this.urdfReader.getJointPosition(jointName));
+                                }
+                            }
+                            this.bestJointAngles = new Map(this.currentJointAngles);
+                        }
+                    }
+
+                    // Perform IK iterations
                     for (let i = 0; i < this.samplesPerFrame; i++) {
                         this.randomizePose();
                     }
@@ -553,45 +594,31 @@
                     this.lastLogTime = now;
                 }
 
-                // Store previous joint angles if we don't have current ones
-                if (this.currentJointAngles.size === 0) {
-                    for (const [jointName, jointData] of this.urdfReader.robot.joints) {
-                        if (jointData.type === 'revolute' || jointData.type === 'prismatic') {
-                            this.currentJointAngles.set(jointName, this.urdfReader.getJointPosition(jointName));
-                        }
+                // Store current configuration before trying new one
+                const previousAngles = new Map();
+                for (const [jointName, jointData] of this.urdfReader.robot.joints) {
+                    if (jointData.type === 'revolute' || jointData.type === 'prismatic') {
+                        previousAngles.set(jointName, this.urdfReader.getJointPosition(jointName));
                     }
                 }
 
-                // Create perturbed joint angles
-                const perturbedAngles = new Map();
+                // Try a random configuration
                 const perturbationRange = (10 * Math.PI) / 180; // ±10 degrees in radians
-
-                // Iterate through all joints in the URDF
                 for (const [jointName, jointData] of this.urdfReader.robot.joints) {
-                    // Skip non-movable joints
                     if (jointData.type !== 'revolute' && jointData.type !== 'prismatic') continue;
                     
-                    // Get current angle
-                    const currentAngle = this.currentJointAngles.get(jointName);
-                    
-                    // Add random perturbation within ±10 degrees
+                    const currentAngle = previousAngles.get(jointName);
                     const perturbation = (Math.random() * 2 - 1) * perturbationRange;
                     let newAngle = currentAngle + perturbation;
                     
-                    // Respect joint limits if they exist
                     if (jointData.limits) {
                         const lower = jointData.limits.lower;
                         const upper = jointData.limits.upper;
                         newAngle = Math.max(lower, Math.min(upper, newAngle));
                     }
                     
-                    perturbedAngles.set(jointName, newAngle);
-                    
                     try {
-                        // Set joint angle in URDF reader
                         this.urdfReader.setJointPosition(jointName, newAngle);
-                        
-                        // Update joint transform in 3D scene
                         const jointObject = this.jointObjects.get(jointName);
                         if (jointObject) {
                             // Reset transformation
@@ -614,7 +641,6 @@
                             rotQuat.setFromAxisAngle(axisVec, newAngle);
                             jointObject.quaternion.multiply(rotQuat);
 
-                            // Force update of matrix
                             jointObject.updateMatrix();
                             jointObject.updateMatrixWorld(true);
                         }
@@ -623,36 +649,111 @@
                     }
                 }
 
-                // Force update the entire robot's world matrix
+                // Update robot's world matrix
                 if (this.robotModel) {
                     this.robotModel.updateMatrixWorld(true);
                 }
 
-                // Calculate cost for this pose
+                // Evaluate new configuration
                 if (this.endEffectorName) {
                     const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
                     if (endEffectorObject) {
                         const worldPos = new THREE.Vector3();
                         endEffectorObject.getWorldPosition(worldPos);
-                        
                         const distance = this.calculatePositionCost(worldPos);
                         
-                        // Update best solution if this is better
+                        // Add FK point for visualization
+                        this.addFKPoint(worldPos);
+
+                        // If new position is better, keep it and update best
                         if (distance < this.bestDistance) {
                             this.bestDistance = distance;
-                            this.setBestSolution();
-                            // Update current angles to the better solution
-                            this.currentJointAngles = new Map(perturbedAngles);
-                            this.logger.success(`New best solution found! Distance: ${distance.toFixed(4)}`);
+                            // Store current configuration as best
+                            this.bestJointAngles = new Map();
+                            for (const [jointName, jointData] of this.urdfReader.robot.joints) {
+                                if (jointData.type === 'revolute' || jointData.type === 'prismatic') {
+                                    this.bestJointAngles.set(jointName, this.urdfReader.getJointPosition(jointName));
+                                }
+                            }
+                            this.logger.success(`Found better solution! Distance: ${distance.toFixed(4)}`);
                         } else {
-                            // Revert to previous best solution
-                            this.applyBestSolution();
-                            // Keep the current angles at the best known configuration
-                            this.currentJointAngles = new Map(this.bestJointAngles);
+                            // Restore previous configuration if not better
+                            for (const [jointName, angle] of previousAngles) {
+                                this.urdfReader.setJointPosition(jointName, angle);
+                                const jointObject = this.jointObjects.get(jointName);
+                                if (jointObject) {
+                                    const jointData = this.urdfReader.robot.joints.get(jointName);
+                                    
+                                    jointObject.position.set(0, 0, 0);
+                                    jointObject.quaternion.set(0, 0, 0, 1);
+                                    
+                                    if (jointData.origin) {
+                                        const xyz = jointData.origin.xyz || [0, 0, 0];
+                                        const rpy = jointData.origin.rpy || [0, 0, 0];
+                                        jointObject.position.set(xyz[0], xyz[1], xyz[2]);
+                                        const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
+                                        jointObject.setRotationFromEuler(euler);
+                                    }
+                                    
+                                    const axis = jointData.axis || [0, 0, 1];
+                                    const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
+                                    const rotQuat = new THREE.Quaternion();
+                                    rotQuat.setFromAxisAngle(axisVec, angle);
+                                    jointObject.quaternion.multiply(rotQuat);
+
+                                    jointObject.updateMatrix();
+                                    jointObject.updateMatrixWorld(true);
+                                }
+                            }
+                            // Update robot's world matrix after restoring
+                            if (this.robotModel) {
+                                this.robotModel.updateMatrixWorld(true);
+                            }
                         }
-                        
-                        this.addFKPoint(worldPos);
                     }
+                }
+            }
+
+            applyConfiguration(jointAngles) {
+                for (const [jointName, angle] of jointAngles) {
+                    try {
+                        this.urdfReader.setJointPosition(jointName, angle);
+                        const jointObject = this.jointObjects.get(jointName);
+                        if (jointObject) {
+                            const jointData = this.urdfReader.robot.joints.get(jointName);
+                            
+                            // Reset transformation
+                            jointObject.position.set(0, 0, 0);
+                            jointObject.quaternion.set(0, 0, 0, 1);
+                            
+                            // Apply original transform from URDF
+                            if (jointData.origin) {
+                                const xyz = jointData.origin.xyz || [0, 0, 0];
+                                const rpy = jointData.origin.rpy || [0, 0, 0];
+                                jointObject.position.set(xyz[0], xyz[1], xyz[2]);
+                                const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
+                                jointObject.setRotationFromEuler(euler);
+                            }
+                            
+                            // Apply joint rotation
+                            const axis = jointData.axis || [0, 0, 1];
+                            const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
+                            const rotQuat = new THREE.Quaternion();
+                            rotQuat.setFromAxisAngle(axisVec, angle);
+                            jointObject.quaternion.multiply(rotQuat);
+
+                            // Force update of matrix
+                            jointObject.updateMatrix();
+                            jointObject.updateMatrixWorld(true);
+                        }
+                    } catch (error) {
+                        this.logger.error(`Error applying configuration for joint ${jointName}: ${error.message}`);
+                    }
+                }
+
+                // Force update the entire robot's world matrix
+                if (this.robotModel) {
+                    this.robotModel.updateMatrixWorld(true);
                 }
             }
 
@@ -717,7 +818,7 @@
                 const toggleButton = document.getElementById('toggleExploration');
                 toggleButton.textContent = 'Stop Exploration';
                 toggleButton.style.background = '#f44336';
-                this.logger.info('Started random FK exploration');
+                this.logger.info('Started IK exploration');
             }
 
             stopExploration() {
@@ -725,7 +826,7 @@
                 const toggleButton = document.getElementById('toggleExploration');
                 toggleButton.textContent = 'Start Exploration';
                 toggleButton.style.background = '#4CAF50';
-                this.logger.info('Stopped random FK exploration');
+                this.logger.info('Stopped IK exploration');
             }
 
             async loadAvailableModels() {
@@ -937,10 +1038,10 @@
                 const size = box.getSize(new THREE.Vector3());
                 const center = box.getCenter(new THREE.Vector3());
 
-                // Position robot at origin
-                this.robotModel.position.set(-center.x, -center.y, -center.z);
+                // Only adjust Z position to place robot on ground
+                this.robotModel.position.set(0, 0, -box.min.z);
 
-                // Adjust camera distance based on robot size
+                // Adjust camera distance based on robot size without scaling
                 const maxDim = Math.max(size.x, size.y, size.z);
                 const distance = maxDim * 2;
                 this.camera.position.set(distance, distance, distance);
