@@ -29,6 +29,7 @@
             padding: 20px;
             background: #f8f9fa;
             border-radius: 6px;
+            border-left: 4px solid #2196F3;
         }
         .tool-section h2 {
             color: #333;
@@ -65,12 +66,42 @@
             position: absolute;
             left: 0;
         }
+        .new-badge {
+            display: inline-block;
+            background-color: #4CAF50;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+        code {
+            background: #e9ecef;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>JSROB - Robot Visualization Tools</h1>
         
+        <div class="tool-section">
+            <h2>URDF IK Explorer <span class="new-badge">New!</span></h2>
+            <p>Advanced inverse kinematics exploration and visualization tool for URDF robot models.</p>
+            <ul class="features">
+                <li>Interactive IK exploration with random sampling</li>
+                <li>Adjustable perturbation range and exploration speed</li>
+                <li>Real-time visualization of explored configurations</li>
+                <li>Interactive target pose manipulation</li>
+                <li>Support for both position and orientation targets</li>
+                <li>Visual feedback with FK point cloud</li>
+            </ul>
+            <a href="/public/urdf_Ik.html" class="button">Launch URDF IK Explorer</a>
+        </div>
+
         <div class="tool-section">
             <h2>URDF Viewer</h2>
             <p>Interactive 3D visualization tool for URDF robot models.</p>
@@ -82,7 +113,7 @@
                 <li>Real-time debug console</li>
                 <li>Tree structure visualization</li>
             </ul>
-            <a href="/public/urdf_viewer.html" class="button">Launch URDF Viewer</a>
+            <a href="/public/urdf_viewer_modular.html" class="button">Launch URDF Viewer</a>
         </div>
 
         <div class="tool-section">
@@ -111,16 +142,19 @@
 
         <div class="tool-section">
             <h2>Getting Started</h2>
-            <p>To use the URDF Viewer:</p>
+            <p>To use any of the tools:</p>
             <ol>
                 <li>Place your URDF files in the <code>/public/models</code> directory</li>
                 <li>Place corresponding mesh files (.dae or .stl) in <code>/public/models/meshes</code></li>
-                <li>Launch the appropriate viewer using the buttons above</li>
+                <li>Launch the desired tool using the buttons above</li>
                 <li>Select your model from the dropdown menu</li>
                 <li>Use mouse to interact with the 3D view:
                     <ul>
-                        <li>Left click + drag to rotate</li>
+                        <li>Left click + drag to rotate view</li>
+                        <li>Right click + drag to pan</li>
                         <li>Mouse wheel to zoom</li>
+                        <li>Press 'G' for translation mode (IK Explorer)</li>
+                        <li>Press 'R' for rotation mode (IK Explorer)</li>
                     </ul>
                 </li>
             </ol>
@@ -131,6 +165,7 @@
             <p>The following example models are included:</p>
             <ul class="features">
                 <li>KUKA LBR iiwa 7 R800 robot arm</li>
+                <li>More models coming soon...</li>
             </ul>
         </div>
     </div>
