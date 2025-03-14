@@ -197,8 +197,8 @@
             </div>
             <div class="slider-container">
                 <label for="speedSlider">Exploration Speed (samples/frame):</label>
-                <input type="range" id="speedSlider" min="1" max="100" value="10">
-                <span id="speedValue">10</span>
+                <input type="range" id="speedSlider" min="1" max="500" value="50">
+                <span id="speedValue">50</span>
             </div>
             <div class="checkbox-container">
                 <label>
@@ -256,8 +256,10 @@
                 this.stlLoader = null;
                 this.colladaLoader = null;
                 this.fkPoints = null;
-                this.endEffectorName = null; // Will store the name of the last link
-                this.showFKPoints = true; // New property to track FK points visibility
+                this.endEffectorName = null;
+                this.showFKPoints = true;
+                this.totalFKCalculations = 0;
+                this.lastLogTime = Date.now();
 
                 this.init();
                 this.setupEventListeners();
@@ -318,8 +320,10 @@
                 const pointGeometry = new THREE.BufferGeometry();
                 const pointMaterial = new THREE.PointsMaterial({
                     color: 0x00ff00,
-                    size: 0.02,
-                    sizeAttenuation: true
+                    size: 0.01, // Smaller point size for better density visualization
+                    sizeAttenuation: true,
+                    opacity: 0.6, // Add some transparency
+                    transparent: true
                 });
                 this.fkPoints = new THREE.Points(pointGeometry, pointMaterial);
                 this.scene.add(this.fkPoints);
@@ -387,37 +391,24 @@
             randomizePose() {
                 if (!this.urdfReader || !this.jointObjects) return;
 
-                // Debug available joints
-                const allJoints = this.urdfReader.robot.joints;
-                this.logger.info(`Available joints in URDF: ${Array.from(allJoints.keys()).join(', ')}`);
-                this.logger.info(`Available joint objects in scene: ${Array.from(this.jointObjects.keys()).join(', ')}`);
-
-                // Store initial positions for debugging
-                if (this.endEffectorName) {
-                    const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
-                    if (endEffectorObject) {
-                        const initialPos = new THREE.Vector3();
-                        endEffectorObject.getWorldPosition(initialPos);
-                        this.logger.info(`Initial end effector position: x=${initialPos.x.toFixed(3)}, y=${initialPos.y.toFixed(3)}, z=${initialPos.z.toFixed(3)}`);
-                    }
+                // Track calculations
+                this.totalFKCalculations++;
+                
+                // Log stats every second
+                const now = Date.now();
+                if (now - this.lastLogTime >= 1000) {
+                    this.logger.info(`Total FK calculations: ${this.totalFKCalculations}, Current rate: ${this.samplesPerFrame} samples/frame`);
+                    this.lastLogTime = now;
                 }
 
-                // Track if any joint was actually moved
-                let jointsUpdated = false;
-                
                 // Iterate through all joints in the URDF
                 for (const [jointName, jointData] of this.urdfReader.robot.joints) {
                     // Skip non-movable joints
-                    if (jointData.type !== 'revolute' && jointData.type !== 'prismatic') {
-                        this.logger.info(`Skipping non-movable joint ${jointName} of type ${jointData.type}`);
-                        continue;
-                    }
-
-                    this.logger.info(`Processing joint: ${jointName}, type: ${jointData.type}, limits: ${JSON.stringify(jointData.limits)}`);
+                    if (jointData.type !== 'revolute' && jointData.type !== 'prismatic') continue;
                     
                     // Default limits for joints without defined limits
-                    const defaultLower = -Math.PI;  // -180 degrees
-                    const defaultUpper = Math.PI;   // 180 degrees
+                    const defaultLower = -Math.PI;
+                    const defaultUpper = Math.PI;
                     
                     let lower = defaultLower;
                     let upper = defaultUpper;
@@ -430,7 +421,6 @@
                     
                     // Generate random angle within joint limits
                     const randomAngle = lower + Math.random() * (upper - lower);
-                    this.logger.info(`Joint ${jointName}: angle=${randomAngle.toFixed(3)} rad (${(randomAngle * 180 / Math.PI).toFixed(1)}°)`);
                     
                     try {
                         // Set joint angle in URDF reader
@@ -462,24 +452,14 @@
                             // Force update of matrix
                             jointObject.updateMatrix();
                             jointObject.updateMatrixWorld(true);
-                            
-                            jointsUpdated = true;
-                            
-                            // Log joint's world position for debugging
-                            const jointPos = new THREE.Vector3();
-                            jointObject.getWorldPosition(jointPos);
-                            this.logger.info(`Joint ${jointName} world position: x=${jointPos.x.toFixed(3)}, y=${jointPos.y.toFixed(3)}, z=${jointPos.z.toFixed(3)}`);
-                        } else {
-                            this.logger.warning(`No joint object found for joint: ${jointName}`);
                         }
                     } catch (error) {
                         this.logger.error(`Error processing joint ${jointName}: ${error.message}`);
-                        continue;
                     }
                 }
 
                 // Force update the entire robot's world matrix
-                if (jointsUpdated && this.robotModel) {
+                if (this.robotModel) {
                     this.robotModel.updateMatrixWorld(true);
                 }
 
@@ -490,17 +470,6 @@
                         const worldPos = new THREE.Vector3();
                         endEffectorObject.getWorldPosition(worldPos);
                         this.addFKPoint(worldPos);
-                        
-                        // Log the full transformation chain for debugging
-                        let current = endEffectorObject;
-                        let chain = [];
-                        while (current) {
-                            const pos = new THREE.Vector3();
-                            current.getWorldPosition(pos);
-                            chain.push(`${current.name}: x=${pos.x.toFixed(3)}, y=${pos.y.toFixed(3)}, z=${pos.z.toFixed(3)}`);
-                            current = current.parent;
-                        }
-                        this.logger.info('Transformation chain:\n' + chain.join('\n'));
                     }
                 }
             }
@@ -518,33 +487,29 @@
                 // Only add points if visualization is enabled
                 if (!this.showFKPoints) return;
 
-                // Log the coordinates to debug console
-                this.logger.info(`FK Position: x=${position.x.toFixed(3)}, y=${position.y.toFixed(3)}, z=${position.z.toFixed(3)}`);
-
-                const positions = this.fkPoints.geometry.attributes.position;
-                const maxPoints = 1000; // Maximum number of points to show
+                const maxPoints = 10000; // Increased to 10000 points
+                let positions = this.fkPoints.geometry.attributes.position;
                 
                 if (!positions || positions.count === 0) {
-                    // Create new positions array if none exists
                     const newPositions = new Float32Array(maxPoints * 3);
                     this.fkPoints.geometry.setAttribute('position', new THREE.BufferAttribute(newPositions, 3));
                     positions = this.fkPoints.geometry.attributes.position;
+                    this.currentPointIndex = 0;
+                    this.numPoints = 0;
                 }
 
-                // Shift existing points back
-                for (let i = positions.count - 1; i > 0; i--) {
-                    positions.array[i * 3] = positions.array[(i - 1) * 3];
-                    positions.array[i * 3 + 1] = positions.array[(i - 1) * 3 + 1];
-                    positions.array[i * 3 + 2] = positions.array[(i - 1) * 3 + 2];
-                }
+                // Use circular buffer approach
+                const idx = this.currentPointIndex * 3;
+                positions.array[idx] = position.x;
+                positions.array[idx + 1] = position.y;
+                positions.array[idx + 2] = position.z;
 
-                // Add new point at the beginning
-                positions.array[0] = position.x;
-                positions.array[1] = position.y;
-                positions.array[2] = position.z;
+                // Update current index and count
+                this.currentPointIndex = (this.currentPointIndex + 1) % maxPoints;
+                this.numPoints = Math.min(this.numPoints + 1, maxPoints);
 
                 positions.needsUpdate = true;
-                this.fkPoints.geometry.setDrawRange(0, Math.min(positions.count + 1, maxPoints));
+                this.fkPoints.geometry.setDrawRange(0, this.numPoints);
             }
 
             startExploration() {
@@ -552,6 +517,10 @@
                     this.logger.warning('No robot model loaded');
                     return;
                 }
+
+                // Reset counters
+                this.totalFKCalculations = 0;
+                this.lastLogTime = Date.now();
 
                 // Clear existing FK points
                 if (this.fkPoints) {
