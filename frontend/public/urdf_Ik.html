@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>URDF IK Explorer</title>
+    <!-- Load Three.js and wait for it to be ready -->
+    <script src="https://unpkg.com/three@0.140.0/build/three.min.js"></script>
+    <script>
+        // Wait for Three.js to load
+        window.addEventListener('load', function() {
+            // Load additional scripts after Three.js is ready
+            function loadScript(src) {
+                return new Promise((resolve, reject) => {
+                    const script = document.createElement('script');
+                    script.src = src;
+                    script.onload = resolve;
+                    script.onerror = reject;
+                    document.head.appendChild(script);
+                });
+            }
+
+            Promise.all([
+                loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/STLLoader.js'),
+                loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/ColladaLoader.js'),
+                loadScript('https://unpkg.com/three@0.140.0/examples/js/controls/OrbitControls.js'),
+                loadScript('urdfreader.js')
+            ]).then(() => {
+                // Initialize the viewer after all scripts are loaded
+                if (typeof THREE === 'undefined') {
+                    throw new Error('Three.js failed to load');
+                }
+                if (typeof THREE.STLLoader === 'undefined') {
+                    throw new Error('STLLoader failed to load');
+                }
+                if (typeof THREE.ColladaLoader === 'undefined') {
+                    throw new Error('ColladaLoader failed to load');
+                }
+                if (typeof THREE.OrbitControls === 'undefined') {
+                    throw new Error('OrbitControls failed to load');
+                }
+                // Initialize the visualizer
+                window.visualizer = new URDFIKExplorer();
+            }).catch(error => {
+                console.error('Error loading scripts:', error);
+                const debugConsole = document.getElementById('debugConsole');
+                if (debugConsole) {
+                    const timestamp = new Date().toLocaleTimeString();
+                    debugConsole.innerHTML = `<div><span class="timestamp">[${timestamp}]</span> <span class="error">Error loading required scripts: ${error.message}</span></div>`;
+                }
+            });
+        });
+    </script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+            height: calc(100vh - 40px);
+        }
+        .controls {
+            flex: 0 0 300px;
+            min-width: 300px;
+            max-width: 300px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+            max-height: calc(100vh - 80px);
+        }
+        #webgl-container {
+            flex: 1;
+            min-width: 0;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        select {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 8px;
+            transition: background-color 0.3s;
+            font-size: 14px;
+        }
+        button:hover {
+            opacity: 0.9;
+        }
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        #loadingStatus {
+            margin-top: 8px;
+            color: #666;
+            font-size: 12px;
+        }
+        #debugConsole {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 150px;
+            background: rgba(30, 30, 30, 0.95);
+            color: #00ff00;
+            font-family: monospace;
+            font-size: 11px;
+            padding: 8px;
+            overflow-y: auto;
+            z-index: 1000;
+            border-top: 2px solid #333;
+        }
+        #debugConsole .timestamp {
+            color: #888;
+            margin-right: 8px;
+            font-size: 10px;
+        }
+        #debugConsole .error {
+            color: #ff4444;
+            font-weight: bold;
+        }
+        #debugConsole .warning {
+            color: #ffaa00;
+            font-weight: bold;
+        }
+        #debugConsole .success {
+            color: #44ff44;
+            font-weight: bold;
+        }
+        #debugConsole .info {
+            color: #00ff00;
+        }
+        h2 {
+            margin: 0 0 16px 0;
+            font-size: 18px;
+        }
+        .controls > div {
+            margin-bottom: 12px;
+        }
+        .slider-container {
+            margin-top: 10px;
+        }
+        .slider-container label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        .slider-container input {
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <h2>URDF IK Explorer</h2>
+            <div>
+                <select id="modelSelect">
+                    <option value="">Select a robot model</option>
+                </select>
+                <button id="loadButton">Load Model</button>
+                <div id="loadingStatus"></div>
+            </div>
+            <div class="slider-container">
+                <label for="speedSlider">Exploration Speed (samples/frame):</label>
+                <input type="range" id="speedSlider" min="1" max="100" value="10">
+                <span id="speedValue">10</span>
+            </div>
+            <div>
+                <button id="toggleExploration">Start Exploration</button>
+            </div>
+        </div>
+        <div id="webgl-container"></div>
+    </div>
+    <div id="debugConsole"></div>
+
+    <script>
+        class DebugLogger {
+            constructor() {
+                this.console = document.getElementById('debugConsole');
+                if (!this.console) {
+                    console.error('Debug console element not found!');
+                    throw new Error('Debug console element not found');
+                }
+                this.log('Debug console initialized', 'success');
+            }
+
+            log(message, type = 'info') {
+                if (!this.console) return;
+                const timestamp = new Date().toLocaleTimeString();
+                const entry = document.createElement('div');
+                entry.innerHTML = `<span class="timestamp">[${timestamp}]</span> <span class="${type}">${message}</span>`;
+                this.console.appendChild(entry);
+                this.console.scrollTop = this.console.scrollHeight;
+                console.log(`[${type}] ${message}`);
+            }
+
+            info(message) { this.log(message, 'info'); }
+            success(message) { this.log(message, 'success'); }
+            warning(message) { this.log(message, 'warning'); }
+            error(message) { this.log(message, 'error'); }
+            clear() { this.console.innerHTML = ''; }
+        }
+
+        class URDFIKExplorer {
+            constructor() {
+                this.logger = new DebugLogger();
+                this.scene = null;
+                this.camera = null;
+                this.renderer = null;
+                this.robotModel = null;
+                this.urdfReader = null;
+                this.isExploring = false;
+                this.samplesPerFrame = 10;
+                this.controls = null;
+                this.stlLoader = null;
+                this.colladaLoader = null;
+
+                this.init();
+                this.setupEventListeners();
+                this.loadAvailableModels();
+                this.animate();
+            }
+
+            init() {
+                // Create scene
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0xf3f4f6);
+
+                // Create camera
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.camera.position.set(3, 3, 3);
+                this.camera.up.set(0, 0, 1); // Set Z as up vector
+                this.camera.lookAt(0, 0, 0);
+
+                // Create renderer
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                const container = document.getElementById('webgl-container');
+                this.renderer.setSize(container.clientWidth, container.clientHeight);
+                container.appendChild(this.renderer.domElement);
+
+                // Initialize loaders
+                this.stlLoader = new THREE.STLLoader();
+                this.colladaLoader = new THREE.ColladaLoader();
+
+                // Add orbit controls
+                this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
+                this.controls.enableDamping = true;
+                this.controls.dampingFactor = 0.25;
+
+                // Add grid - XY plane since Z is up
+                const gridSize = 10;
+                const gridDivisions = 10;
+                const gridColorCenter = 0x444444;
+                const gridColor = 0x888888;
+
+                // Create single XY plane grid (horizontal)
+                const grid = new THREE.GridHelper(gridSize, gridDivisions, gridColorCenter, gridColor);
+                grid.rotation.x = Math.PI / 2; // Rotate to lie on XY plane
+                this.scene.add(grid);
+
+                // Add axes helper
+                const axesHelper = new THREE.AxesHelper(1);
+                this.scene.add(axesHelper);
+
+                // Add lights
+                const ambientLight = new THREE.AmbientLight(0x404040, 1.5);
+                this.scene.add(ambientLight);
+
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+                directionalLight.position.set(1, 1, 1);
+                this.scene.add(directionalLight);
+
+                window.addEventListener('resize', () => this.onWindowResize());
+            }
+
+            setupEventListeners() {
+                // Load button
+                const loadButton = document.getElementById('loadButton');
+                loadButton.addEventListener('click', () => this.loadSelectedModel());
+
+                // Toggle exploration button
+                const toggleButton = document.getElementById('toggleExploration');
+                toggleButton.addEventListener('click', () => {
+                    if (this.isExploring) {
+                        this.stopExploration();
+                    } else {
+                        this.startExploration();
+                    }
+                });
+
+                // Speed slider
+                const speedSlider = document.getElementById('speedSlider');
+                const speedValue = document.getElementById('speedValue');
+                speedSlider.addEventListener('input', () => {
+                    this.samplesPerFrame = parseInt(speedSlider.value);
+                    speedValue.textContent = this.samplesPerFrame;
+                });
+            }
+
+            onWindowResize() {
+                const container = document.getElementById('webgl-container');
+                this.camera.aspect = container.clientWidth / container.clientHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(container.clientWidth, container.clientHeight);
+            }
+
+            animate() {
+                requestAnimationFrame(() => this.animate());
+
+                if (this.controls) {
+                    this.controls.update();
+                }
+
+                if (this.isExploring && this.urdfReader) {
+                    // Perform random FK evaluations
+                    for (let i = 0; i < this.samplesPerFrame; i++) {
+                        this.randomizePose();
+                    }
+                }
+
+                this.renderer.render(this.scene, this.camera);
+            }
+
+            randomizePose() {
+                const movableJoints = this.urdfReader.getMovableJoints();
+                for (const [jointName, jointInfo] of movableJoints) {
+                    const { lower, upper } = jointInfo.limits;
+                    // Generate random angle within joint limits
+                    const randomAngle = lower + Math.random() * (upper - lower);
+                    this.urdfReader.setJointPosition(jointName, randomAngle);
+                }
+            }
+
+            startExploration() {
+                if (!this.urdfReader) {
+                    this.logger.warning('No robot model loaded');
+                    return;
+                }
+
+                this.isExploring = true;
+                const toggleButton = document.getElementById('toggleExploration');
+                toggleButton.textContent = 'Stop Exploration';
+                toggleButton.style.background = '#f44336';
+                this.logger.info('Started random FK exploration');
+            }
+
+            stopExploration() {
+                this.isExploring = false;
+                const toggleButton = document.getElementById('toggleExploration');
+                toggleButton.textContent = 'Start Exploration';
+                toggleButton.style.background = '#4CAF50';
+                this.logger.info('Stopped random FK exploration');
+            }
+
+            async loadAvailableModels() {
+                try {
+                    this.logger.info('Starting to load URDF models from server...');
+                    const timestamp = new Date().getTime();
+                    const url = `/api/models?t=${timestamp}`;
+                    this.logger.info(`Fetching models from: ${url}`);
+                    
+                    const response = await fetch(url);
+                    this.logger.info(`Server response status: ${response.status} ${response.statusText}`);
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    
+                    const text = await response.text();
+                    this.logger.info(`Raw server response: ${text}`);
+                    
+                    if (!text) {
+                        throw new Error('Empty response from server');
+                    }
+                    
+                    const models = JSON.parse(text);
+                    this.logger.success(`Found ${models.length} URDF models on server`);
+                    
+                    const select = document.getElementById('modelSelect');
+                    if (!select) {
+                        throw new Error('Could not find modelSelect element in DOM');
+                    }
+                    
+                    select.innerHTML = '<option value="">Select a model...</option>';
+                    
+                    if (!Array.isArray(models) || models.length === 0) {
+                        this.logger.warning('No URDF models found on server');
+                        select.innerHTML = '<option value="">No models available</option>';
+                        return;
+                    }
+                    
+                    models.forEach(model => {
+                        if (!model.name || !model.urdf) {
+                            this.logger.warning(`Invalid model data received: ${JSON.stringify(model)}`);
+                            return;
+                        }
+                        const option = document.createElement('option');
+                        option.value = model.urdf;
+                        option.textContent = model.name;
+                        select.appendChild(option);
+                        this.logger.info(`Added model to dropdown: ${model.name}`);
+                    });
+                    
+                    this.logger.success(`Successfully populated dropdown with ${models.length} URDF models`);
+                } catch (error) {
+                    this.logger.error(`Failed to load models from server: ${error.message}`);
+                    const select = document.getElementById('modelSelect');
+                    if (select) {
+                        select.innerHTML = '<option value="">Error loading models</option>';
+                    }
+                }
+            }
+
+            async loadSelectedModel() {
+                const modelSelect = document.getElementById('modelSelect');
+                const modelFile = modelSelect ? modelSelect.value : '';
+                
+                if (!modelFile) {
+                    this.logger.warning('No model selected in dropdown');
+                    alert('Please select a model first');
+                    return;
+                }
+
+                const loadingStatus = document.getElementById('loadingStatus');
+                const loadButton = document.getElementById('loadButton');
+                
+                try {
+                    this.logger.info(`Starting to load URDF model: ${modelFile}`);
+                    loadingStatus.textContent = 'Loading URDF...';
+                    loadButton.disabled = true;
+
+                    // Clear existing robot
+                    if (this.robotModel) {
+                        this.scene.remove(this.robotModel);
+                        this.robotModel = null;
+                    }
+
+                    // Create new robot model group
+                    this.robotModel = new THREE.Group();
+                    this.scene.add(this.robotModel);
+
+                    // Load and parse URDF
+                    this.urdfReader = new URDFReader();
+                    const robotData = await this.urdfReader.loadModelFromFile(modelFile);
+                    this.logger.success(`Successfully parsed URDF for robot: ${robotData.name}`);
+                    await this.visualizeRobot(robotData);
+
+                    loadingStatus.textContent = 'Model loaded successfully';
+                    this.logger.success('Robot model loaded');
+                } catch (error) {
+                    console.error('Error:', error);
+                    this.logger.error(`Failed to load model: ${error.message}`);
+                    this.logger.error('Stack trace: ' + error.stack);
+                    loadingStatus.textContent = 'Error loading model: ' + error.message;
+                } finally {
+                    loadButton.disabled = false;
+                }
+            }
+
+            async visualizeRobot(robotData) {
+                this.logger.info('Starting robot visualization...');
+                
+                const linkObjects = new Map();
+                const meshStatus = document.getElementById('loadingStatus');
+                
+                // Create visual objects for each link
+                for (const [linkName, linkData] of robotData.links) {
+                    this.logger.info(`Processing link: ${linkName}`);
+                    const linkGroup = new THREE.Group();
+                    linkGroup.name = linkName;
+
+                    if (linkData.visual) {
+                        if (linkData.visual.geometry) {
+                            if (linkData.visual.geometry.type === 'mesh') {
+                                const filename = linkData.visual.geometry.filename;
+                                
+                                try {
+                                    const mesh = await this.loadMesh(filename);
+                                    
+                                    if (linkData.visual.origin) {
+                                        const xyz = linkData.visual.origin.xyz || [0, 0, 0];
+                                        const rpy = linkData.visual.origin.rpy || [0, 0, 0];
+                                        
+                                        if (filename.toLowerCase().endsWith('.stl')) {
+                                            mesh.position.set(xyz[0], xyz[1], xyz[2]);
+                                            const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
+                                            const quaternion = new THREE.Quaternion().setFromEuler(euler);
+                                            mesh.quaternion.premultiply(quaternion);
+                                        } else {
+                                            mesh.position.set(xyz[0], xyz[1], xyz[2]);
+                                            mesh.rotation.set(rpy[0], rpy[1], rpy[2]);
+                                        }
+                                    }
+
+                                    if (linkData.visual.geometry.scale) {
+                                        const scale = linkData.visual.geometry.scale;
+                                        mesh.scale.set(scale[0], scale[1], scale[2]);
+                                    }
+
+                                    linkGroup.add(mesh);
+                                    this.logger.success(`Added mesh for link: ${linkName}`);
+                                } catch (error) {
+                                    this.logger.error(`Failed to load mesh for link ${linkName}: ${error.message}`);
+                                    // Create a placeholder geometry for failed loads
+                                    const placeholder = new THREE.BoxGeometry(0.1, 0.1, 0.1);
+                                    const material = new THREE.MeshPhongMaterial({ color: 0xff0000 });
+                                    const placeholderMesh = new THREE.Mesh(placeholder, material);
+                                    linkGroup.add(placeholderMesh);
+                                    this.logger.warning(`Added placeholder geometry for ${linkName}`);
+                                }
+                            }
+                        }
+                    }
+
+                    linkObjects.set(linkName, linkGroup);
+                }
+
+                // Build the joint structure
+                this.jointObjects = new Map();
+                for (const [jointName, jointData] of robotData.joints) {
+                    const parentLink = linkObjects.get(jointData.parent);
+                    const childLink = linkObjects.get(jointData.child);
+
+                    if (parentLink && childLink) {
+                        const jointGroup = new THREE.Group();
+                        jointGroup.name = jointName;
+                        
+                        if (jointData.origin) {
+                            const xyz = jointData.origin.xyz || [0, 0, 0];
+                            const rpy = jointData.origin.rpy || [0, 0, 0];
+                            jointGroup.position.set(xyz[0], xyz[1], xyz[2]);
+                            jointGroup.rotation.set(rpy[0], rpy[1], rpy[2]);
+                        }
+
+                        jointGroup.add(childLink);
+                        parentLink.add(jointGroup);
+                        this.jointObjects.set(jointName, jointGroup);
+
+                        // Add joint axis visualization
+                        const jointAxis = jointData.axis || [0, 0, 1];
+                        const axisHelper = new THREE.ArrowHelper(
+                            new THREE.Vector3(jointAxis[0], jointAxis[1], jointAxis[2]),
+                            new THREE.Vector3(0, 0, 0),
+                            0.2,  // Shorter length for less visual clutter
+                            0xff0000
+                        );
+                        jointGroup.add(axisHelper);
+                    }
+                }
+
+                // Add root links to the robot model
+                for (const rootLink of robotData.rootLinks) {
+                    const rootObject = linkObjects.get(rootLink);
+                    if (rootObject) {
+                        this.robotModel.add(rootObject);
+                    }
+                }
+
+                // Calculate bounding box and adjust camera
+                const box = new THREE.Box3().setFromObject(this.robotModel);
+                const size = box.getSize(new THREE.Vector3());
+                const center = box.getCenter(new THREE.Vector3());
+
+                // Position robot at origin
+                this.robotModel.position.set(-center.x, -center.y, -center.z);
+
+                // Adjust camera distance based on robot size
+                const maxDim = Math.max(size.x, size.y, size.z);
+                const distance = maxDim * 2;
+                this.camera.position.set(distance, distance, distance);
+                this.camera.up.set(0, 0, 1); // Ensure Z is up
+                this.camera.lookAt(0, 0, 0);
+
+                this.logger.success('Robot visualization complete');
+            }
+
+            async loadMesh(filename) {
+                return new Promise((resolve, reject) => {
+                    const meshPath = `/public/models/meshes/${filename}`;
+                    this.logger.info(`Loading mesh: ${meshPath}`);
+                    
+                    if (filename.toLowerCase().endsWith('.stl')) {
+                        this.stlLoader.load(
+                            meshPath,
+                            (geometry) => {
+                                geometry.computeBoundingBox();
+                                const material = new THREE.MeshPhongMaterial({ 
+                                    color: 0x808080,
+                                    shininess: 30,
+                                    specular: 0x111111
+                                });
+                                const mesh = new THREE.Mesh(geometry, material);
+                                mesh.rotation.set(-Math.PI/2, 0, 0);
+                                this.logger.success(`Successfully loaded STL: ${filename}`);
+                                resolve(mesh);
+                            },
+                            (progress) => {
+                                if (progress.lengthComputable) {
+                                    const percentComplete = (progress.loaded / progress.total) * 100;
+                                    this.logger.info(`Loading ${filename}: ${Math.round(percentComplete)}%`);
+                                }
+                            },
+                            (error) => {
+                                this.logger.error(`Failed to load STL: ${filename} - ${error.message}`);
+                                reject(error);
+                            }
+                        );
+                    } else if (filename.toLowerCase().endsWith('.dae')) {
+                        this.colladaLoader.load(
+                            meshPath,
+                            (collada) => {
+                                this.logger.success(`Successfully loaded DAE: ${filename}`);
+                                resolve(collada.scene);
+                            },
+                            (progress) => {
+                                if (progress.lengthComputable) {
+                                    const percentComplete = (progress.loaded / progress.total) * 100;
+                                    this.logger.info(`Loading ${filename}: ${Math.round(percentComplete)}%`);
+                                }
+                            },
+                            (error) => {
+                                this.logger.error(`Failed to load DAE: ${filename} - ${error.message}`);
+                                reject(error);
+                            }
+                        );
+                    } else {
+                        const error = new Error(`Unsupported file format: ${filename}`);
+                        this.logger.error(error.message);
+                        reject(error);
+                    }
+                });
+            }
+        }
+    </script>
+</body>
+</html> 
