@@ -24,6 +24,7 @@
                 loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/STLLoader.js'),
                 loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/ColladaLoader.js'),
                 loadScript('https://unpkg.com/three@0.140.0/examples/js/controls/OrbitControls.js'),
+                loadScript('https://unpkg.com/three@0.140.0/examples/js/controls/TransformControls.js'),
                 loadScript('urdfreader.js')
             ]).then(() => {
                 // Initialize the viewer after all scripts are loaded
@@ -182,6 +183,29 @@
             height: 16px;
             cursor: pointer;
         }
+        .control-group {
+            margin-top: 16px;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .control-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+        }
+        .button-group {
+            display: flex;
+            gap: 8px;
+        }
+        .mode-button {
+            flex: 1;
+            background: #666;
+            padding: 6px 12px;
+        }
+        .mode-button.active {
+            background: #4CAF50;
+        }
     </style>
 </head>
 <body>
@@ -208,6 +232,13 @@
             </div>
             <div>
                 <button id="toggleExploration">Start Exploration</button>
+            </div>
+            <div class="control-group">
+                <label>Target Controls:</label>
+                <div class="button-group">
+                    <button id="translateMode" class="mode-button active">Translate</button>
+                    <button id="rotateMode" class="mode-button">Rotate</button>
+                </div>
             </div>
         </div>
         <div id="webgl-container"></div>
@@ -260,6 +291,11 @@
                 this.showFKPoints = true;
                 this.totalFKCalculations = 0;
                 this.lastLogTime = Date.now();
+                this.transformControls = null;
+                this.targetPose = null;
+                this.bestDistance = Infinity;
+                this.bestJointAngles = new Map();
+                this.currentJointAngles = new Map();
 
                 this.init();
                 this.setupEventListeners();
@@ -316,6 +352,16 @@
                 directionalLight.position.set(1, 1, 1);
                 this.scene.add(directionalLight);
 
+                // Add transform controls
+                this.transformControls = new THREE.TransformControls(this.camera, this.renderer.domElement);
+                this.transformControls.addEventListener('dragging-changed', (event) => {
+                    this.controls.enabled = !event.value;
+                });
+                this.scene.add(this.transformControls);
+
+                // Create target pose
+                this.createTargetPose();
+
                 // Add points for FK visualization
                 const pointGeometry = new THREE.BufferGeometry();
                 const pointMaterial = new THREE.PointsMaterial({
@@ -362,6 +408,40 @@
                         this.fkPoints.visible = this.showFKPoints;
                     }
                 });
+
+                // Transform mode controls
+                const translateButton = document.getElementById('translateMode');
+                const rotateButton = document.getElementById('rotateMode');
+
+                translateButton.addEventListener('click', () => {
+                    this.transformControls.setMode('translate');
+                    translateButton.classList.add('active');
+                    rotateButton.classList.remove('active');
+                });
+
+                rotateButton.addEventListener('click', () => {
+                    this.transformControls.setMode('rotate');
+                    rotateButton.classList.add('active');
+                    translateButton.classList.remove('active');
+                });
+
+                // Add keyboard shortcuts
+                window.addEventListener('keydown', (event) => {
+                    switch(event.key.toLowerCase()) {
+                        case 'g':
+                            // Translation mode
+                            this.transformControls.setMode('translate');
+                            translateButton.classList.add('active');
+                            rotateButton.classList.remove('active');
+                            break;
+                        case 'r':
+                            // Rotation mode
+                            this.transformControls.setMode('rotate');
+                            rotateButton.classList.add('active');
+                            translateButton.classList.remove('active');
+                            break;
+                    }
+                });
             }
 
             onWindowResize() {
@@ -385,7 +465,79 @@
                     }
                 }
 
+                // Update target pose label to face camera
+                if (this.targetPose) {
+                    const sprite = this.targetPose.children.find(child => child instanceof THREE.Sprite);
+                    if (sprite) {
+                        sprite.quaternion.copy(this.camera.quaternion);
+                    }
+                }
+
                 this.renderer.render(this.scene, this.camera);
+            }
+
+            calculatePositionCost(endEffectorPos) {
+                if (!this.targetPose) return Infinity;
+                
+                const targetPos = new THREE.Vector3();
+                this.targetPose.getWorldPosition(targetPos);
+                
+                return endEffectorPos.distanceTo(targetPos);
+            }
+
+            setBestSolution() {
+                // Store current joint angles as best solution
+                this.bestJointAngles.clear();
+                for (const [jointName, jointData] of this.urdfReader.robot.joints) {
+                    if (jointData.type === 'revolute' || jointData.type === 'prismatic') {
+                        this.bestJointAngles.set(jointName, this.currentJointAngles.get(jointName));
+                    }
+                }
+            }
+
+            applyBestSolution() {
+                if (this.bestJointAngles.size === 0) return;
+
+                for (const [jointName, angle] of this.bestJointAngles) {
+                    try {
+                        this.urdfReader.setJointPosition(jointName, angle);
+                        const jointObject = this.jointObjects.get(jointName);
+                        if (jointObject) {
+                            const jointData = this.urdfReader.robot.joints.get(jointName);
+                            
+                            // Reset transformation
+                            jointObject.position.set(0, 0, 0);
+                            jointObject.quaternion.set(0, 0, 0, 1);
+                            
+                            // Apply original transform from URDF
+                            if (jointData.origin) {
+                                const xyz = jointData.origin.xyz || [0, 0, 0];
+                                const rpy = jointData.origin.rpy || [0, 0, 0];
+                                jointObject.position.set(xyz[0], xyz[1], xyz[2]);
+                                const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
+                                jointObject.setRotationFromEuler(euler);
+                            }
+                            
+                            // Apply joint rotation
+                            const axis = jointData.axis || [0, 0, 1];
+                            const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
+                            const rotQuat = new THREE.Quaternion();
+                            rotQuat.setFromAxisAngle(axisVec, angle);
+                            jointObject.quaternion.multiply(rotQuat);
+
+                            // Force update of matrix
+                            jointObject.updateMatrix();
+                            jointObject.updateMatrixWorld(true);
+                        }
+                    } catch (error) {
+                        this.logger.error(`Error applying best solution for joint ${jointName}: ${error.message}`);
+                    }
+                }
+
+                // Force update the entire robot's world matrix
+                if (this.robotModel) {
+                    this.robotModel.updateMatrixWorld(true);
+                }
             }
 
             randomizePose() {
@@ -397,34 +549,47 @@
                 // Log stats every second
                 const now = Date.now();
                 if (now - this.lastLogTime >= 1000) {
-                    this.logger.info(`Total FK calculations: ${this.totalFKCalculations}, Current rate: ${this.samplesPerFrame} samples/frame`);
+                    this.logger.info(`Total FK calculations: ${this.totalFKCalculations}, Current rate: ${this.samplesPerFrame} samples/frame, Best distance: ${this.bestDistance.toFixed(4)}`);
                     this.lastLogTime = now;
                 }
+
+                // Store previous joint angles if we don't have current ones
+                if (this.currentJointAngles.size === 0) {
+                    for (const [jointName, jointData] of this.urdfReader.robot.joints) {
+                        if (jointData.type === 'revolute' || jointData.type === 'prismatic') {
+                            this.currentJointAngles.set(jointName, this.urdfReader.getJointPosition(jointName));
+                        }
+                    }
+                }
+
+                // Create perturbed joint angles
+                const perturbedAngles = new Map();
+                const perturbationRange = (10 * Math.PI) / 180; // ±10 degrees in radians
 
                 // Iterate through all joints in the URDF
                 for (const [jointName, jointData] of this.urdfReader.robot.joints) {
                     // Skip non-movable joints
                     if (jointData.type !== 'revolute' && jointData.type !== 'prismatic') continue;
                     
-                    // Default limits for joints without defined limits
-                    const defaultLower = -Math.PI;
-                    const defaultUpper = Math.PI;
+                    // Get current angle
+                    const currentAngle = this.currentJointAngles.get(jointName);
                     
-                    let lower = defaultLower;
-                    let upper = defaultUpper;
+                    // Add random perturbation within ±10 degrees
+                    const perturbation = (Math.random() * 2 - 1) * perturbationRange;
+                    let newAngle = currentAngle + perturbation;
                     
-                    // Only try to access limits if they exist
+                    // Respect joint limits if they exist
                     if (jointData.limits) {
-                        lower = typeof jointData.limits.lower === 'number' ? jointData.limits.lower : defaultLower;
-                        upper = typeof jointData.limits.upper === 'number' ? jointData.limits.upper : defaultUpper;
+                        const lower = jointData.limits.lower;
+                        const upper = jointData.limits.upper;
+                        newAngle = Math.max(lower, Math.min(upper, newAngle));
                     }
                     
-                    // Generate random angle within joint limits
-                    const randomAngle = lower + Math.random() * (upper - lower);
+                    perturbedAngles.set(jointName, newAngle);
                     
                     try {
                         // Set joint angle in URDF reader
-                        this.urdfReader.setJointPosition(jointName, randomAngle);
+                        this.urdfReader.setJointPosition(jointName, newAngle);
                         
                         // Update joint transform in 3D scene
                         const jointObject = this.jointObjects.get(jointName);
@@ -446,7 +611,7 @@
                             const axis = jointData.axis || [0, 0, 1];
                             const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
                             const rotQuat = new THREE.Quaternion();
-                            rotQuat.setFromAxisAngle(axisVec, randomAngle);
+                            rotQuat.setFromAxisAngle(axisVec, newAngle);
                             jointObject.quaternion.multiply(rotQuat);
 
                             // Force update of matrix
@@ -463,12 +628,29 @@
                     this.robotModel.updateMatrixWorld(true);
                 }
 
-                // Add point for current end-effector position
+                // Calculate cost for this pose
                 if (this.endEffectorName) {
                     const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
                     if (endEffectorObject) {
                         const worldPos = new THREE.Vector3();
                         endEffectorObject.getWorldPosition(worldPos);
+                        
+                        const distance = this.calculatePositionCost(worldPos);
+                        
+                        // Update best solution if this is better
+                        if (distance < this.bestDistance) {
+                            this.bestDistance = distance;
+                            this.setBestSolution();
+                            // Update current angles to the better solution
+                            this.currentJointAngles = new Map(perturbedAngles);
+                            this.logger.success(`New best solution found! Distance: ${distance.toFixed(4)}`);
+                        } else {
+                            // Revert to previous best solution
+                            this.applyBestSolution();
+                            // Keep the current angles at the best known configuration
+                            this.currentJointAngles = new Map(this.bestJointAngles);
+                        }
+                        
                         this.addFKPoint(worldPos);
                     }
                 }
@@ -518,9 +700,12 @@
                     return;
                 }
 
-                // Reset counters
+                // Reset counters and best solution
                 this.totalFKCalculations = 0;
                 this.lastLogTime = Date.now();
+                this.bestDistance = Infinity;
+                this.bestJointAngles.clear();
+                this.currentJointAngles.clear();
 
                 // Clear existing FK points
                 if (this.fkPoints) {
@@ -825,6 +1010,41 @@
                         reject(error);
                     }
                 });
+            }
+
+            createTargetPose() {
+                // Create a group for the target pose
+                this.targetPose = new THREE.Group();
+                
+                // Create axes for the target pose (gnomon)
+                const axesHelper = new THREE.AxesHelper(0.1); // Smaller axes
+                this.targetPose.add(axesHelper);
+
+                // Create a label for the target
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                canvas.width = 128; // Smaller canvas
+                canvas.height = 32; // Smaller canvas
+                context.fillStyle = '#ffffff';
+                context.font = 'bold 24px Arial'; // Smaller font
+                context.textAlign = 'center';
+                context.fillText('Target', 64, 24);
+
+                const texture = new THREE.CanvasTexture(canvas);
+                const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
+                const sprite = new THREE.Sprite(spriteMaterial);
+                sprite.scale.set(0.25, 0.0625, 1); // Smaller sprite
+                sprite.position.set(0, 0, 0.15); // Position closer to axes
+                this.targetPose.add(sprite);
+
+                // Position the target pose
+                this.targetPose.position.set(1, 1, 1);
+                this.scene.add(this.targetPose);
+
+                // Attach transform controls to target pose
+                this.transformControls.attach(this.targetPose);
+                this.transformControls.setMode('translate'); // Start in translate mode
+                this.transformControls.setSize(0.8); // Make handles slightly smaller
             }
         }
     </script>
