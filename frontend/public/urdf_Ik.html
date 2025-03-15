@@ -235,6 +235,18 @@
                     Show FK Points
                 </label>
             </div>
+            <div class="checkbox-container">
+                <label>
+                    <input type="checkbox" id="showFKComparison">
+                    Show FK Comparison Logs
+                </label>
+            </div>
+            <div class="checkbox-container">
+                <label>
+                    <input type="checkbox" id="showFKTiming">
+                    Show FK Timing Logs
+                </label>
+            </div>
             <div>
                 <button id="toggleExploration">Start Exploration</button>
             </div>
@@ -295,6 +307,8 @@
                 this.fkPoints = null;
                 this.endEffectorName = null;
                 this.showFKPoints = true;
+                this.showFKComparison = false;
+                this.showFKTiming = false;
                 this.totalFKCalculations = 0;
                 this.lastLogTime = Date.now();
                 this.transformControls = null;
@@ -302,10 +316,13 @@
                 this.bestDistance = Infinity;
                 this.bestJointAngles = new Map();
                 this.currentJointAngles = new Map();
-                
-                // Add markers for FK comparison
                 this.viewerMarker = null;
                 this.fkMarker = null;
+                
+                // Add performance tracking
+                this.frameStartTime = 0;
+                this.lastFrameTime = 0;
+                this.framePoseCount = 0;
 
                 this.init();
                 this.setupEventListeners();
@@ -446,6 +463,18 @@
                     }
                 });
 
+                // FK Comparison logging checkbox
+                const showFKComparisonCheckbox = document.getElementById('showFKComparison');
+                showFKComparisonCheckbox.addEventListener('change', () => {
+                    this.showFKComparison = showFKComparisonCheckbox.checked;
+                });
+
+                // FK Timing logging checkbox
+                const showFKTimingCheckbox = document.getElementById('showFKTiming');
+                showFKTimingCheckbox.addEventListener('change', () => {
+                    this.showFKTiming = showFKTimingCheckbox.checked;
+                });
+
                 // Transform mode controls
                 const translateButton = document.getElementById('translateMode');
                 const rotateButton = document.getElementById('rotateMode');
@@ -520,9 +549,45 @@
                         const bestConfig = new Map(this.bestJointAngles);
                         const bestDist = this.bestDistance;
 
+                        // Start timing for this frame's pose calculations
+                        this.frameStartTime = performance.now();
+                        this.framePoseCount = 0;
+                        let fkCalculationTime = 0;
+
                         // Perform IK iterations
                         for (let i = 0; i < this.samplesPerFrame; i++) {
+                            this.framePoseCount++;
+                            const fkStartTime = performance.now();
                             this.randomizePose();
+                            fkCalculationTime += performance.now() - fkStartTime;
+                        }
+
+                        // Calculate timing for this frame
+                        const frameEndTime = performance.now();
+                        const frameTime = frameEndTime - this.frameStartTime;
+                        const avgTimePerPose = frameTime / this.framePoseCount;
+                        const avgFKTimePerPose = fkCalculationTime / this.framePoseCount;
+
+                        // Log performance stats every second
+                        const now = Date.now();
+                        if (now - this.lastLogTime >= 1000) {
+                            this.logger.info(`Performance Stats:
+                            Total FK calculations: ${this.totalFKCalculations}
+                            Frame time: ${frameTime.toFixed(2)}ms
+                            Poses this frame: ${this.framePoseCount}
+                            Avg time per pose: ${avgTimePerPose.toFixed(2)}ms
+                            Current rate: ${this.samplesPerFrame} samples/frame
+                            Best distance: ${this.bestDistance.toFixed(4)}
+                            Perturbation range: ±${this.perturbationRange}°`);
+
+                            if (this.showFKTiming) {
+                                this.logger.info(`FK Timing Stats:
+                                Total FK time this frame: ${fkCalculationTime.toFixed(2)}ms
+                                Avg FK time per pose: ${avgFKTimePerPose.toFixed(2)}ms
+                                FK calculations per second: ${(1000 / avgFKTimePerPose).toFixed(1)}`);
+                            }
+                            
+                            this.lastLogTime = now;
                         }
 
                         // If no better solution was found, restore the best configuration
@@ -640,13 +705,6 @@
                 // Track calculations
                 this.totalFKCalculations++;
                 
-                // Log stats every second
-                const now = Date.now();
-                if (now - this.lastLogTime >= 1000) {
-                    this.logger.info(`Total FK calculations: ${this.totalFKCalculations}, Current rate: ${this.samplesPerFrame} samples/frame, Best distance: ${this.bestDistance.toFixed(4)}, Perturbation range: ±${this.perturbationRange}°`);
-                    this.lastLogTime = now;
-                }
-
                 // Store current configuration before trying new one
                 const previousAngles = new Map();
                 for (const [jointName, jointData] of this.urdfReader.robot.joints) {
@@ -656,12 +714,16 @@
                 }
 
                 // Try a random configuration
-                const perturbationRadians = (this.perturbationRange * Math.PI) / 180.0; // Explicit float division
+                const perturbationRadians = (this.perturbationRange * Math.PI) / 180.0;
+                
+                // Start timing for Three.js FK
+                const threejsStartTime = performance.now();
+                
+                // Apply random configuration using Three.js
                 for (const [jointName, jointData] of this.urdfReader.robot.joints) {
                     if (jointData.type !== 'revolute' && jointData.type !== 'prismatic') continue;
                     
                     const currentAngle = previousAngles.get(jointName);
-                    // Generate a float between -1.0 and 1.0, then scale by perturbation range
                     const randomFloat = (Math.random() * 2.0 - 1.0);
                     const perturbation = randomFloat * perturbationRadians;
                     let newAngle = currentAngle + perturbation;
@@ -709,11 +771,14 @@
                     this.robotModel.updateMatrixWorld(true);
                 }
 
+                const threejsEndTime = performance.now();
+                const threejsTime = threejsEndTime - threejsStartTime;
+
                 // Evaluate new configuration
                 if (this.endEffectorName) {
                     const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
                     if (endEffectorObject) {
-                        // Get viewer's direct world position
+                        // Get viewer's direct world position from Three.js
                         const viewerWorldPos = new THREE.Vector3();
                         endEffectorObject.getWorldPosition(viewerWorldPos);
 
@@ -724,11 +789,27 @@
                                 currentAngles.set(jointName, this.urdfReader.getJointPosition(jointName));
                             }
                         }
+
+                        // Time our FK calculation
+                        const fkStartTime = performance.now();
                         const fkResult = this.calculateFK(currentAngles);
+                        const fkEndTime = performance.now();
+                        const fkTime = fkEndTime - fkStartTime;
 
                         // Update visual comparison
                         if (fkResult) {
                             this.updateFKComparison(viewerWorldPos, fkResult.position);
+                            
+                            // Log timing comparison if enabled
+                            if (this.showFKTiming) {
+                                const posDiff = viewerWorldPos.distanceTo(fkResult.position);
+                                this.logger.info(`=== FK Method Comparison ===
+                                Three.js FK time: ${threejsTime.toFixed(3)}ms
+                                Our FK time: ${fkTime.toFixed(3)}ms
+                                Position difference: ${posDiff.toFixed(6)}
+                                Three.js position: (${viewerWorldPos.x.toFixed(4)}, ${viewerWorldPos.y.toFixed(4)}, ${viewerWorldPos.z.toFixed(4)})
+                                Our FK position: (${fkResult.position.x.toFixed(4)}, ${fkResult.position.y.toFixed(4)}, ${fkResult.position.z.toFixed(4)})`);
+                            }
                         }
 
                         const distance = this.calculatePositionCost(viewerWorldPos);
@@ -1337,12 +1418,14 @@
                 this.viewerMarker.position.copy(viewerWorldPos);
                 this.fkMarker.position.copy(fkPos);
 
-                // Calculate and log difference
-                const posDiff = viewerWorldPos.distanceTo(fkPos);
-                this.logger.info(`=== FK Comparison ===
-                Viewer pos: (${viewerWorldPos.x.toFixed(4)}, ${viewerWorldPos.y.toFixed(4)}, ${viewerWorldPos.z.toFixed(4)})
-                FK pos: (${fkPos.x.toFixed(4)}, ${fkPos.y.toFixed(4)}, ${fkPos.z.toFixed(4)})
-                Difference: ${posDiff.toFixed(6)}`);
+                // Only log if comparison logging is enabled
+                if (this.showFKComparison) {
+                    const posDiff = viewerWorldPos.distanceTo(fkPos);
+                    this.logger.info(`=== FK Comparison ===
+                    Viewer pos: (${viewerWorldPos.x.toFixed(4)}, ${viewerWorldPos.y.toFixed(4)}, ${viewerWorldPos.z.toFixed(4)})
+                    FK pos: (${fkPos.x.toFixed(4)}, ${fkPos.y.toFixed(4)}, ${fkPos.z.toFixed(4)})
+                    Difference: ${posDiff.toFixed(6)}`);
+                }
             }
         }
     </script>
