@@ -247,6 +247,12 @@
                     Show FK Timing Logs
                 </label>
             </div>
+            <div class="checkbox-container">
+                <label>
+                    <input type="checkbox" id="useFKFunction" checked>
+                    Use FK Function (vs Direct Drawing)
+                </label>
+            </div>
             <div>
                 <button id="toggleExploration">Start Exploration</button>
             </div>
@@ -323,6 +329,8 @@
                 this.frameStartTime = 0;
                 this.lastFrameTime = 0;
                 this.framePoseCount = 0;
+
+                this.useFKFunction = true;  // Default to using FK function
 
                 this.init();
                 this.setupEventListeners();
@@ -473,6 +481,12 @@
                 const showFKTimingCheckbox = document.getElementById('showFKTiming');
                 showFKTimingCheckbox.addEventListener('change', () => {
                     this.showFKTiming = showFKTimingCheckbox.checked;
+                });
+
+                // FK Function toggle checkbox
+                const useFKFunctionCheckbox = document.getElementById('useFKFunction');
+                useFKFunctionCheckbox.addEventListener('change', () => {
+                    this.useFKFunction = useFKFunctionCheckbox.checked;
                 });
 
                 // Transform mode controls
@@ -806,19 +820,24 @@
                         const viewerWorldPos = new THREE.Vector3();
                         endEffectorObject.getWorldPosition(viewerWorldPos);
 
-                        // Get our FK calculation
-                        const currentAngles = new Map();
-                        for (const [jointName, jointData] of this.urdfReader.robot.joints) {
-                            if (jointData.type === 'revolute' || jointData.type === 'prismatic') {
-                                currentAngles.set(jointName, this.urdfReader.getJointPosition(jointName));
-                            }
-                        }
+                        let fkResult = null;
+                        let fkTime = 0;
 
-                        // Time our FK calculation
-                        const fkStartTime = performance.now();
-                        const fkResult = this.calculateFK(currentAngles);
-                        const fkEndTime = performance.now();
-                        const fkTime = fkEndTime - fkStartTime;
+                        if (this.useFKFunction) {
+                            // Get our FK calculation
+                            const currentAngles = new Map();
+                            for (const [jointName, jointData] of this.urdfReader.robot.joints) {
+                                if (jointData.type === 'revolute' || jointData.type === 'prismatic') {
+                                    currentAngles.set(jointName, this.urdfReader.getJointPosition(jointName));
+                                }
+                            }
+
+                            // Time our FK calculation
+                            const fkStartTime = performance.now();
+                            fkResult = this.calculateFK(currentAngles);
+                            const fkEndTime = performance.now();
+                            fkTime = fkEndTime - fkStartTime;
+                        }
 
                         // Update visual comparison
                         if (fkResult) {
@@ -828,11 +847,12 @@
                             if (this.showFKTiming) {
                                 const posDiff = viewerWorldPos.distanceTo(fkResult.position);
                                 this.logger.info(`=== FK Method Comparison ===
+                                Method: ${this.useFKFunction ? 'FK Function' : 'Direct Drawing'}
                                 Three.js FK time: ${threejsTime.toFixed(3)}ms
-                                Our FK time: ${fkTime.toFixed(3)}ms
+                                ${this.useFKFunction ? `Our FK time: ${fkTime.toFixed(3)}ms` : ''}
                                 Position difference: ${posDiff.toFixed(6)}
                                 Three.js position: (${viewerWorldPos.x.toFixed(4)}, ${viewerWorldPos.y.toFixed(4)}, ${viewerWorldPos.z.toFixed(4)})
-                                Our FK position: (${fkResult.position.x.toFixed(4)}, ${fkResult.position.y.toFixed(4)}, ${fkResult.position.z.toFixed(4)})`);
+                                ${this.useFKFunction ? `Our FK position: (${fkResult.position.x.toFixed(4)}, ${fkResult.position.y.toFixed(4)}, ${fkResult.position.z.toFixed(4)})` : ''}`);
                             }
                         }
 
