@@ -554,11 +554,24 @@
                         this.framePoseCount = 0;
                         let fkCalculationTime = 0;
 
-                        // Perform IK iterations
-                        for (let i = 0; i < this.samplesPerFrame; i++) {
+                        // Perform IK iterations in two phases
+                        const totalSamples = this.samplesPerFrame;
+                        const phase1Samples = Math.floor(totalSamples / 2);
+                        const phase2Samples = totalSamples - phase1Samples;
+
+                        // Phase 1: Coarse search with full perturbation range
+                        for (let i = 0; i < phase1Samples; i++) {
                             this.framePoseCount++;
                             const fkStartTime = performance.now();
-                            this.randomizePose();
+                            this.randomizePose(1.0); // Full perturbation range
+                            fkCalculationTime += performance.now() - fkStartTime;
+                        }
+
+                        // Phase 2: Fine search with reduced perturbation range
+                        for (let i = 0; i < phase2Samples; i++) {
+                            this.framePoseCount++;
+                            const fkStartTime = performance.now();
+                            this.randomizePose(0.1); // 10% of perturbation range
                             fkCalculationTime += performance.now() - fkStartTime;
                         }
 
@@ -574,7 +587,7 @@
                             this.logger.info(`Performance Stats:
                             Total FK calculations: ${this.totalFKCalculations}
                             Frame time: ${frameTime.toFixed(2)}ms
-                            Poses this frame: ${this.framePoseCount}
+                            Poses this frame: ${this.framePoseCount} (${phase1Samples} coarse + ${phase2Samples} fine)
                             Avg time per pose: ${avgTimePerPose.toFixed(2)}ms
                             Current rate: ${this.samplesPerFrame} samples/frame
                             Best distance: ${this.bestDistance.toFixed(4)}
@@ -699,7 +712,7 @@
                 }
             }
 
-            randomizePose() {
+            randomizePose(perturbationScale = 1.0) {
                 if (!this.urdfReader || !this.jointObjects) return;
 
                 // Track calculations
@@ -713,8 +726,19 @@
                     }
                 }
 
-                // Try a random configuration
-                const perturbationRadians = (this.perturbationRange * Math.PI) / 180.0;
+                // Calculate current distance before attempting new configuration
+                let currentDistance = Infinity;
+                if (this.endEffectorName) {
+                    const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
+                    if (endEffectorObject) {
+                        const currentPos = new THREE.Vector3();
+                        endEffectorObject.getWorldPosition(currentPos);
+                        currentDistance = this.calculatePositionCost(currentPos);
+                    }
+                }
+
+                // Try a random configuration with scaled perturbation
+                const perturbationRadians = (this.perturbationRange * Math.PI / 180.0) * perturbationScale;
                 
                 // Start timing for Three.js FK
                 const threejsStartTime = performance.now();
@@ -812,14 +836,14 @@
                             }
                         }
 
-                        const distance = this.calculatePositionCost(viewerWorldPos);
+                        const newDistance = this.calculatePositionCost(viewerWorldPos);
                         
                         // Add FK point for visualization
                         this.addFKPoint(viewerWorldPos);
 
-                        // If new position is better, keep it and update best
-                        if (distance < this.bestDistance) {
-                            this.bestDistance = distance;
+                        // If new position is better than our current best, keep it and update best
+                        if (newDistance < this.bestDistance) {
+                            this.bestDistance = newDistance;
                             // Store current configuration as best
                             this.bestJointAngles = new Map();
                             for (const [jointName, jointData] of this.urdfReader.robot.joints) {
@@ -827,10 +851,22 @@
                                     this.bestJointAngles.set(jointName, this.urdfReader.getJointPosition(jointName));
                                 }
                             }
-                            this.logger.success(`Found better solution! Distance: ${distance.toFixed(4)}`);
-                        } else {
-                            // Restore previous configuration if not better
-                            this.applyConfiguration(previousAngles);
+                            this.logger.success(`Found better solution! Distance: ${newDistance.toFixed(4)} (improved from ${currentDistance.toFixed(4)})`);
+                            return;
+                        }
+
+                        // If the new solution is not better, restore the previous configuration
+                        this.applyConfiguration(previousAngles);
+                        
+                        // Verify we restored correctly
+                        const verifyPos = new THREE.Vector3();
+                        endEffectorObject.getWorldPosition(verifyPos);
+                        const verifyDistance = this.calculatePositionCost(verifyPos);
+                        
+                        if (Math.abs(verifyDistance - currentDistance) > 0.0001) {
+                            this.logger.warning(`Distance verification failed! Expected ${currentDistance.toFixed(6)} but got ${verifyDistance.toFixed(6)}`);
+                            // As a fallback, apply our known best configuration
+                            this.applyConfiguration(this.bestJointAngles);
                         }
                     }
                 }
