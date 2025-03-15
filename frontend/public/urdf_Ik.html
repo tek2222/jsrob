@@ -928,29 +928,51 @@
                 // Only add points if visualization is enabled
                 if (!this.showFKPoints) return;
 
-                const maxPoints = 10000; // Increased to 10000 points
-                let positions = this.fkPoints.geometry.attributes.position;
-                
-                if (!positions || positions.count === 0) {
-                    const newPositions = new Float32Array(maxPoints * 3);
-                    this.fkPoints.geometry.setAttribute('position', new THREE.BufferAttribute(newPositions, 3));
-                    positions = this.fkPoints.geometry.attributes.position;
+                // Initialize points array if not exists
+                if (!this.fkPointsArray) {
+                    this.fkPointsArray = [];
                     this.currentPointIndex = 0;
-                    this.numPoints = 0;
                 }
 
-                // Use circular buffer approach
-                const idx = this.currentPointIndex * 3;
-                positions.array[idx] = position.x;
-                positions.array[idx + 1] = position.y;
-                positions.array[idx + 2] = position.z;
+                const maxPoints = 1000; // Reduced from 10000 to 1000 for better performance
 
-                // Update current index and count
-                this.currentPointIndex = (this.currentPointIndex + 1) % maxPoints;
-                this.numPoints = Math.min(this.numPoints + 1, maxPoints);
+                // Add new point to array
+                if (this.fkPointsArray.length < maxPoints) {
+                    this.fkPointsArray.push(new THREE.Vector3(position.x, position.y, position.z));
+                } else {
+                    // Reuse existing point at current index
+                    this.fkPointsArray[this.currentPointIndex].copy(position);
+                    this.currentPointIndex = (this.currentPointIndex + 1) % maxPoints;
+                }
 
-                positions.needsUpdate = true;
-                this.fkPoints.geometry.setDrawRange(0, this.numPoints);
+                // Update geometry
+                const positions = new Float32Array(this.fkPointsArray.length * 3);
+                for (let i = 0; i < this.fkPointsArray.length; i++) {
+                    const point = this.fkPointsArray[i];
+                    positions[i * 3] = point.x;
+                    positions[i * 3 + 1] = point.y;
+                    positions[i * 3 + 2] = point.z;
+                }
+
+                // Create new buffer geometry
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                
+                // Update or create points object
+                if (this.fkPoints) {
+                    this.fkPoints.geometry.dispose(); // Clean up old geometry
+                    this.fkPoints.geometry = geometry;
+                } else {
+                    const material = new THREE.PointsMaterial({
+                        color: 0x00ff00,
+                        size: 0.01,
+                        sizeAttenuation: true,
+                        opacity: 0.6,
+                        transparent: true
+                    });
+                    this.fkPoints = new THREE.Points(geometry, material);
+                    this.scene.add(this.fkPoints);
+                }
             }
 
             startExploration() {
@@ -968,8 +990,10 @@
 
                 // Clear existing FK points
                 if (this.fkPoints) {
-                    this.fkPoints.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
-                    this.fkPoints.geometry.setDrawRange(0, 0);
+                    this.fkPoints.geometry.dispose(); // Clean up old geometry
+                    this.fkPoints.geometry = new THREE.BufferGeometry();
+                    this.fkPointsArray = []; // Reset points array
+                    this.currentPointIndex = 0;
                 }
 
                 this.isExploring = true;
@@ -984,6 +1008,15 @@
                 const toggleButton = document.getElementById('toggleExploration');
                 toggleButton.textContent = 'Start Exploration';
                 toggleButton.style.background = '#4CAF50';
+                
+                // Clean up FK points when stopping
+                if (this.fkPoints) {
+                    this.fkPoints.geometry.dispose();
+                    this.fkPoints.geometry = new THREE.BufferGeometry();
+                    this.fkPointsArray = [];
+                    this.currentPointIndex = 0;
+                }
+                
                 this.logger.info('Stopped IK exploration');
             }
 
