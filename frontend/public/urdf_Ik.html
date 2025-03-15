@@ -288,7 +288,7 @@
                 this.urdfReader = null;
                 this.isExploring = false;
                 this.samplesPerFrame = 10;
-                this.perturbationRange = 10; // Default perturbation range in degrees
+                this.perturbationRange = 10;
                 this.controls = null;
                 this.stlLoader = null;
                 this.colladaLoader = null;
@@ -302,6 +302,10 @@
                 this.bestDistance = Infinity;
                 this.bestJointAngles = new Map();
                 this.currentJointAngles = new Map();
+                
+                // Add markers for FK comparison
+                this.viewerMarker = null;
+                this.fkMarker = null;
 
                 this.init();
                 this.setupEventListeners();
@@ -709,12 +713,28 @@
                 if (this.endEffectorName) {
                     const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
                     if (endEffectorObject) {
-                        const worldPos = new THREE.Vector3();
-                        endEffectorObject.getWorldPosition(worldPos);
-                        const distance = this.calculatePositionCost(worldPos);
+                        // Get viewer's direct world position
+                        const viewerWorldPos = new THREE.Vector3();
+                        endEffectorObject.getWorldPosition(viewerWorldPos);
+
+                        // Get our FK calculation
+                        const currentAngles = new Map();
+                        for (const [jointName, jointData] of this.urdfReader.robot.joints) {
+                            if (jointData.type === 'revolute' || jointData.type === 'prismatic') {
+                                currentAngles.set(jointName, this.urdfReader.getJointPosition(jointName));
+                            }
+                        }
+                        const fkResult = this.calculateFK(currentAngles);
+
+                        // Update visual comparison
+                        if (fkResult) {
+                            this.updateFKComparison(viewerWorldPos, fkResult.position);
+                        }
+
+                        const distance = this.calculatePositionCost(viewerWorldPos);
                         
                         // Add FK point for visualization
-                        this.addFKPoint(worldPos);
+                        this.addFKPoint(viewerWorldPos);
 
                         // If new position is better, keep it and update best
                         if (distance < this.bestDistance) {
@@ -1199,25 +1219,45 @@
                 // Early exit if no end effector
                 if (!this.endEffectorName) return null;
 
-                // Find the chain of joints from end effector to root
+                // Find the chain of joints and links from end effector to root
                 const chain = [];
-                let currentJoint = this.endEffectorName;
-                while (currentJoint) {
-                    const jointData = this.urdfReader.robot.joints.get(currentJoint);
-                    if (jointData) {
-                        chain.unshift(jointData); // Add to front of array to get root-to-tip order
-                        currentJoint = jointData.parent;
-                    } else {
-                        break;
+                let currentLink = this.endEffectorName;
+                
+                while (currentLink) {
+                    // Find the joint that has this link as its child
+                    let foundJoint = null;
+                    let parentLink = null;
+                    
+                    for (const [jointName, jointData] of this.urdfReader.robot.joints) {
+                        if (jointData.child === currentLink) {
+                            foundJoint = jointData;
+                            parentLink = jointData.parent;
+                            chain.unshift({
+                                joint: jointData,
+                                childLink: currentLink,
+                                parentLink: parentLink
+                            });
+                            break;
+                        }
                     }
+                    
+                    if (!parentLink) break;
+                    currentLink = parentLink;
                 }
 
-                // Start with identity matrix
+                // Start with identity matrix at the root
                 const result = new THREE.Matrix4();
 
+                // Apply root offset if the robot model has one
+                if (this.robotModel.position) {
+                    result.setPosition(this.robotModel.position);
+                }
+
                 // Multiply matrices in chain from root to tip
-                for (const jointData of chain) {
-                    // Origin transform
+                for (const item of chain) {
+                    const jointData = item.joint;
+                    
+                    // Apply joint origin transform
                     if (jointData.origin) {
                         const xyz = jointData.origin.xyz || [0, 0, 0];
                         const rpy = jointData.origin.rpy || [0, 0, 0];
@@ -1230,7 +1270,7 @@
                         result.multiply(originMatrix);
                     }
 
-                    // Joint transform
+                    // Apply joint motion
                     if ((jointData.type === 'revolute' || jointData.type === 'prismatic') && jointAngles.has(jointData.name)) {
                         const angle = jointAngles.get(jointData.name);
                         const axis = jointData.axis || [0, 0, 1];
@@ -1248,6 +1288,20 @@
                         }
                         result.multiply(jointMatrix);
                     }
+
+                    // Get the child link's visual transform if it exists
+                    const childLinkData = this.urdfReader.robot.links.get(item.childLink);
+                    if (childLinkData && childLinkData.visual && childLinkData.visual.origin) {
+                        const xyz = childLinkData.visual.origin.xyz || [0, 0, 0];
+                        const rpy = childLinkData.visual.origin.rpy || [0, 0, 0];
+                        const visualMatrix = new THREE.Matrix4();
+                        const position = new THREE.Vector3(xyz[0], xyz[1], xyz[2]);
+                        const quaternion = new THREE.Quaternion().setFromEuler(
+                            new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ')
+                        );
+                        visualMatrix.compose(position, quaternion, new THREE.Vector3(1, 1, 1));
+                        result.multiply(visualMatrix);
+                    }
                 }
 
                 // Extract position and orientation
@@ -1260,6 +1314,35 @@
                     position: position,
                     orientation: quaternion
                 };
+            }
+
+            createPositionMarker(color) {
+                const geometry = new THREE.SphereGeometry(0.02);
+                const material = new THREE.MeshBasicMaterial({ color: color });
+                return new THREE.Mesh(geometry, material);
+            }
+
+            updateFKComparison(viewerWorldPos, fkPos) {
+                // Create markers if they don't exist
+                if (!this.viewerMarker) {
+                    this.viewerMarker = this.createPositionMarker(0x00ff00); // Green for viewer
+                    this.scene.add(this.viewerMarker);
+                }
+                if (!this.fkMarker) {
+                    this.fkMarker = this.createPositionMarker(0xff0000); // Red for FK
+                    this.scene.add(this.fkMarker);
+                }
+
+                // Update marker positions
+                this.viewerMarker.position.copy(viewerWorldPos);
+                this.fkMarker.position.copy(fkPos);
+
+                // Calculate and log difference
+                const posDiff = viewerWorldPos.distanceTo(fkPos);
+                this.logger.info(`=== FK Comparison ===
+                Viewer pos: (${viewerWorldPos.x.toFixed(4)}, ${viewerWorldPos.y.toFixed(4)}, ${viewerWorldPos.z.toFixed(4)})
+                FK pos: (${fkPos.x.toFixed(4)}, ${fkPos.y.toFixed(4)}, ${fkPos.z.toFixed(4)})
+                Difference: ${posDiff.toFixed(6)}`);
             }
         }
     </script>
