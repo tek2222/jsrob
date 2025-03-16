@@ -332,15 +332,11 @@
                 this.perturbationRange = 10;
                 this.rotationWeight = 0.5;
                 this.controls = null;
-                this.stlLoader = null;
-                this.colladaLoader = null;
                 this.fkPoints = null;
                 this.endEffectorName = null;
                 this.showFKPoints = true;
                 this.showFKComparison = false;
                 this.showFKTiming = false;
-                this.totalFKCalculations = 0;
-                this.lastLogTime = Date.now();
                 this.transformControls = null;
                 this.targetPose = null;
                 this.bestDistance = Infinity;
@@ -348,19 +344,11 @@
                 this.currentJointAngles = new Map();
                 this.viewerMarker = null;
                 this.fkMarker = null;
-                
-                // Performance tracking
-                this.frameStartTime = 0;
-                this.lastFrameTime = 0;
-                this.framePoseCount = 0;
-                this.avgTimePerPose = 0;
-                this.avgFKTimePerPose = 0;
-                this.avgCostTimePerPose = 0;
-                this.lastFPS = 0;
-                this.frameCount = 0;
-                this.lastFPSUpdate = performance.now();
 
-                this.useFKFunction = true;  // Default to using FK function
+                // Initialize utility classes
+                this.robotVisualizer = null;
+                this.robotKinematics = null;
+                this.performanceMonitor = null;
 
                 this.init();
                 this.setupEventListeners();
@@ -369,59 +357,114 @@
             }
 
             init() {
-                // Create scene
+                // Set up Three.js scene
                 this.scene = new THREE.Scene();
                 this.scene.background = new THREE.Color(0xf3f4f6);
 
-                // Create camera
-                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-                this.camera.position.set(3, 3, 3);
-                this.camera.up.set(0, 0, 1); // Set Z as up vector
+                // Add grid helper
+                const gridHelper = new THREE.GridHelper(10, 10);
+                gridHelper.rotation.x = Math.PI / 2; // Rotate for Z-up configuration
+                this.scene.add(gridHelper);
+
+                // Set up camera
+                const container = document.getElementById('webgl-container');
+                const aspect = container.clientWidth / container.clientHeight;
+                this.camera = new THREE.PerspectiveCamera(45, aspect, 0.1, 1000);
+                this.camera.position.set(5, 5, 5);
+                this.camera.up.set(0, 0, 1);
                 this.camera.lookAt(0, 0, 0);
 
-                // Create renderer
+                // Set up renderer
                 this.renderer = new THREE.WebGLRenderer({ antialias: true });
-                const container = document.getElementById('webgl-container');
                 this.renderer.setSize(container.clientWidth, container.clientHeight);
+                this.renderer.setPixelRatio(window.devicePixelRatio);
                 container.appendChild(this.renderer.domElement);
 
-                // Initialize loaders
-                this.stlLoader = new THREE.STLLoader();
-                this.colladaLoader = new THREE.ColladaLoader();
-
-                // Add orbit controls
+                // Set up orbit controls
                 this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
                 this.controls.enableDamping = true;
-                this.controls.dampingFactor = 0.25;
+                this.controls.dampingFactor = 0.05;
 
-                // Add grid - XY plane since Z is up
-                const gridSize = 10;
-                const gridDivisions = 10;
-                const gridColorCenter = 0x444444;
-                const gridColor = 0x888888;
-
-                // Create single XY plane grid (horizontal)
-                const grid = new THREE.GridHelper(gridSize, gridDivisions, gridColorCenter, gridColor);
-                grid.rotation.x = Math.PI / 2; // Rotate to lie on XY plane
-                this.scene.add(grid);
-
-                // Add axes helper
-                const axesHelper = new THREE.AxesHelper(1);
-                this.scene.add(axesHelper);
-
-                // Add lights
-                const ambientLight = new THREE.AmbientLight(0x404040, 1.5);
-                this.scene.add(ambientLight);
-
-                const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-                directionalLight.position.set(1, 1, 1);
-                this.scene.add(directionalLight);
-
-                // Add transform controls
+                // Set up transform controls
                 this.transformControls = new THREE.TransformControls(this.camera, this.renderer.domElement);
                 this.transformControls.addEventListener('dragging-changed', (event) => {
                     this.controls.enabled = !event.value;
                 });
+                this.scene.add(this.transformControls);
+
+                // Create target pose
+                this.createTargetPose();
+
+                // Add points for FK visualization
+                const pointGeometry = new THREE.BufferGeometry();
+                const pointMaterial = new THREE.PointsMaterial({
+                    color: 0x00ff00,
+                    size: 0.01,
+                    sizeAttenuation: true,
+                    opacity: 0.6,
+                    transparent: true
+                });
+                this.fkPoints = new THREE.Points(pointGeometry, pointMaterial);
+                this.scene.add(this.fkPoints);
+
+                // Add lighting
+                const ambientLight = new THREE.AmbientLight(0x404040);
+                this.scene.add(ambientLight);
+
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(1, 1, 1);
+                this.scene.add(directionalLight);
+
+                // Initialize utility classes
+                this.robotVisualizer = new RobotVisualizer(this.scene, this.logger);
+                this.performanceMonitor = new PerformanceMonitor(this.logger);
+
+                // Handle window resize
+                window.addEventListener('resize', () => {
+                    const container = document.getElementById('webgl-container');
+                    const width = container.clientWidth;
+                    const height = container.clientHeight;
+
+                    this.camera.aspect = width / height;
+                    this.camera.updateProjectionMatrix();
+                    this.renderer.setSize(width, height);
+                });
+            }
+
+            createTargetPose() {
+                // Create a group for the target pose
+                this.targetPose = new THREE.Group();
+                
+                // Create axes for the target pose (gnomon)
+                const axesHelper = new THREE.AxesHelper(0.1); // Smaller axes
+                this.targetPose.add(axesHelper);
+
+                // Create a label for the target
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                canvas.width = 128; // Smaller canvas
+                canvas.height = 32; // Smaller canvas
+                context.fillStyle = '#ffffff';
+                context.font = 'bold 24px Arial'; // Smaller font
+                context.textAlign = 'center';
+                context.fillText('Target', 64, 24);
+
+                const texture = new THREE.CanvasTexture(canvas);
+                const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
+                const sprite = new THREE.Sprite(spriteMaterial);
+                sprite.scale.set(0.25, 0.0625, 1); // Smaller sprite
+                sprite.position.set(0, 0, 0.15); // Position closer to axes
+                this.targetPose.add(sprite);
+
+                // Position the target pose
+                this.targetPose.position.set(1, 1, 1);
+                this.scene.add(this.targetPose);
+
+                // Attach transform controls to target pose
+                this.transformControls.attach(this.targetPose);
+                this.transformControls.setMode('translate'); // Start in translate mode
+                this.transformControls.setSize(0.8); // Make handles slightly smaller
+
                 // Add change handler to update distance when target is moved
                 this.transformControls.addEventListener('change', () => {
                     if (this.endEffectorName && this.robotModel) {
@@ -441,24 +484,6 @@
                         }
                     }
                 });
-                this.scene.add(this.transformControls);
-
-                // Create target pose
-                this.createTargetPose();
-
-                // Add points for FK visualization
-                const pointGeometry = new THREE.BufferGeometry();
-                const pointMaterial = new THREE.PointsMaterial({
-                    color: 0x00ff00,
-                    size: 0.01, // Smaller point size for better density visualization
-                    sizeAttenuation: true,
-                    opacity: 0.6, // Add some transparency
-                    transparent: true
-                });
-                this.fkPoints = new THREE.Points(pointGeometry, pointMaterial);
-                this.scene.add(this.fkPoints);
-
-                window.addEventListener('resize', () => this.onWindowResize());
             }
 
             setupEventListeners() {
@@ -572,15 +597,7 @@
             animate() {
                 requestAnimationFrame(() => this.animate());
 
-                if (this.controls) {
-                    this.controls.update();
-                }
-
-                // Update timing stats
-                this.updateTimingStats();
-
-                // Re-evaluate current solution against new target position
-                if (this.isExploring && this.urdfReader && this.endEffectorName && this.robotModel) {
+                if (this.isExploring && this.endEffectorName) {
                     const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
                     if (endEffectorObject) {
                         const worldPos = new THREE.Vector3();
@@ -605,10 +622,7 @@
                         const bestDist = this.bestDistance;
 
                         // Start timing for this frame's pose calculations
-                        this.frameStartTime = performance.now();
-                        this.framePoseCount = 0;
-                        let fkCalculationTime = 0;
-                        let costCalculationTime = 0;
+                        this.performanceMonitor.startFrame();
 
                         // Perform IK iterations in two phases
                         const totalSamples = this.samplesPerFrame;
@@ -617,49 +631,66 @@
 
                         // Phase 1: Coarse search with full perturbation range
                         for (let i = 0; i < phase1Samples; i++) {
-                            this.framePoseCount++;
                             const fkStartTime = performance.now();
-                            this.randomizePose(1.0); // Full perturbation range
+                            this.randomizePose(1.0);
                             const fkEndTime = performance.now();
-                            fkCalculationTime += fkEndTime - fkStartTime;
+                            const costStartTime = performance.now();
+                            const distance = this.calculatePositionCost(worldPos);
+                            const costEndTime = performance.now();
+                            
+                            this.performanceMonitor.recordPoseCalculation(
+                                fkEndTime - fkStartTime,
+                                costEndTime - costStartTime
+                            );
+
+                            if (distance < this.bestDistance) {
+                                this.bestDistance = distance;
+                                this.setBestSolution();
+                            }
                         }
 
                         // Phase 2: Fine search with reduced perturbation range
                         for (let i = 0; i < phase2Samples; i++) {
-                            this.framePoseCount++;
                             const fkStartTime = performance.now();
-                            this.randomizePose(0.1); // 10% of perturbation range
+                            this.randomizePose(0.1);
                             const fkEndTime = performance.now();
-                            fkCalculationTime += fkEndTime - fkStartTime;
+                            const costStartTime = performance.now();
+                            const distance = this.calculatePositionCost(worldPos);
+                            const costEndTime = performance.now();
+                            
+                            this.performanceMonitor.recordPoseCalculation(
+                                fkEndTime - fkStartTime,
+                                costEndTime - costStartTime
+                            );
+
+                            if (distance < this.bestDistance) {
+                                this.bestDistance = distance;
+                                this.setBestSolution();
+                            }
                         }
 
-                        // Calculate timing for this frame
-                        const frameEndTime = performance.now();
-                        const frameTime = frameEndTime - this.frameStartTime;
-                        this.avgTimePerPose = frameTime / this.framePoseCount;
-                        this.avgFKTimePerPose = fkCalculationTime / this.framePoseCount;
-                        this.avgCostTimePerPose = costCalculationTime / this.framePoseCount;
+                        // Update frame statistics
+                        this.performanceMonitor.updateFrameStats();
 
-                        // Log performance stats every second
-                        const now = Date.now();
-                        if (now - this.lastLogTime >= 1000) {
-                            this.logger.info(`Performance Stats:
-                            Total FK calculations: ${this.totalFKCalculations}
-                            Frame time: ${frameTime.toFixed(2)}ms
-                            Poses this frame: ${this.framePoseCount} (${phase1Samples} coarse + ${phase2Samples} fine)
-                            Avg time per pose: ${this.avgTimePerPose.toFixed(2)}ms
-                            Current rate: ${this.samplesPerFrame} samples/frame
-                            Best distance: ${this.bestDistance.toFixed(4)}
-                            Perturbation range: ±${this.perturbationRange}°`);
-
-                            if (this.showFKTiming) {
-                                this.logger.info(`FK Timing Stats:
-                                Total FK time this frame: ${fkCalculationTime.toFixed(2)}ms
-                                Avg FK time per pose: ${this.avgFKTimePerPose.toFixed(2)}ms
-                                FK calculations per second: ${(1000 / this.avgFKTimePerPose).toFixed(1)}`);
-                            }
-                            
-                            this.lastLogTime = now;
+                        // Log performance stats and update timing display
+                        const additionalStats = {
+                            'Best distance': this.bestDistance.toFixed(4),
+                            'Perturbation range': `±${this.perturbationRange}°`,
+                            'Samples per frame': this.samplesPerFrame
+                        };
+                        this.performanceMonitor.logStats(additionalStats);
+                        
+                        // Update timing stats display
+                        const stats = this.performanceMonitor.getStats();
+                        const timingStats = document.getElementById('timing-stats');
+                        if (timingStats) {
+                            timingStats.textContent = 
+`FPS: ${stats.fps.toFixed(0)}
+Poses/frame: ${stats.posesPerFrame}
+Avg time/pose: ${stats.avgTimePerPose.toFixed(2)}ms
+├─ FK: ${stats.avgFKTimePerPose.toFixed(2)}ms
+└─ Cost: ${stats.avgCostTimePerPose.toFixed(2)}ms
+Best distance: ${this.bestDistance.toFixed(4)}`;
                         }
 
                         // If no better solution was found, restore the best configuration
@@ -669,6 +700,10 @@
                             this.applyConfiguration(this.bestJointAngles);
                         }
                     }
+                } else if (document.getElementById('timing-stats')) {
+                    document.getElementById('timing-stats').textContent = 
+`FPS: ${this.performanceMonitor ? this.performanceMonitor.getFPS().toFixed(0) : '--'}
+(Exploration stopped)`;
                 }
 
                 // Update target pose label to face camera
@@ -1168,116 +1203,16 @@
             async visualizeRobot(robotData) {
                 this.logger.info('Starting robot visualization...');
                 
-                const linkObjects = new Map();
-                const meshStatus = document.getElementById('loadingStatus');
+                // Clear existing robot
+                if (this.robotModel) {
+                    this.scene.remove(this.robotModel);
+                }
                 
-                // Create visual objects for each link
-                for (const [linkName, linkData] of robotData.links) {
-                    this.logger.info(`Processing link: ${linkName}`);
-                    const linkGroup = new THREE.Group();
-                    linkGroup.name = linkName;
-
-                    if (linkData.visual) {
-                        if (linkData.visual.geometry) {
-                            if (linkData.visual.geometry.type === 'mesh') {
-                                const filename = linkData.visual.geometry.filename;
-                                
-                                try {
-                                    const mesh = await this.loadMesh(filename);
-                                    
-                                    if (linkData.visual.origin) {
-                                        const xyz = linkData.visual.origin.xyz || [0, 0, 0];
-                                        const rpy = linkData.visual.origin.rpy || [0, 0, 0];
-                                        
-                                        // For STL files, handle orientation differently
-                                        if (filename.toLowerCase().endsWith('.stl')) {
-                                            // Apply position
-                                            mesh.position.set(xyz[0], xyz[1], xyz[2]);
-                                            
-                                            // Create a rotation matrix from the URDF RPY values
-                                            const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
-                                            const quaternion = new THREE.Quaternion().setFromEuler(euler);
-                                            
-                                            // Combine with the existing rotation (which corrects the coordinate system)
-                                            mesh.quaternion.premultiply(quaternion);
-                                        } else {
-                                            // For DAE files, apply transform normally
-                                            mesh.position.set(xyz[0], xyz[1], xyz[2]);
-                                            mesh.rotation.set(rpy[0], rpy[1], rpy[2]);
-                                        }
-                                    }
-
-                                    if (linkData.visual.geometry.scale) {
-                                        const scale = linkData.visual.geometry.scale;
-                                        mesh.scale.set(scale[0], scale[1], scale[2]);
-                                    }
-
-                                    linkGroup.add(mesh);
-                                    this.logger.success(`Added mesh for link: ${linkName}`);
-                                } catch (error) {
-                                    this.logger.error(`Failed to load mesh for link ${linkName}: ${error.message}`);
-                                    // Create a placeholder geometry for failed loads
-                                    const placeholder = new THREE.BoxGeometry(0.1, 0.1, 0.1);
-                                    const material = new THREE.MeshPhongMaterial({ color: 0xff0000 });
-                                    const placeholderMesh = new THREE.Mesh(placeholder, material);
-                                    linkGroup.add(placeholderMesh);
-                                    this.logger.warning(`Added placeholder geometry for ${linkName}`);
-                                }
-                            }
-                        }
-                    }
-
-                    linkObjects.set(linkName, linkGroup);
-                }
-
-                // Build the joint structure
-                this.jointObjects = new Map();
-                for (const [jointName, jointData] of robotData.joints) {
-                    const parentLink = linkObjects.get(jointData.parent);
-                    const childLink = linkObjects.get(jointData.child);
-
-                    if (parentLink && childLink) {
-                        const jointGroup = new THREE.Group();
-                        jointGroup.name = jointName;
-                        
-                        if (jointData.origin) {
-                            const xyz = jointData.origin.xyz || [0, 0, 0];
-                            const rpy = jointData.origin.rpy || [0, 0, 0];
-                            
-                            // Apply transformations using matrix operations
-                            const originMatrix = new THREE.Matrix4();
-                            const position = new THREE.Vector3(xyz[0], xyz[1], xyz[2]);
-                            const quaternion = new THREE.Quaternion().setFromEuler(
-                                new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ')
-                            );
-                            originMatrix.compose(position, quaternion, new THREE.Vector3(1, 1, 1));
-                            jointGroup.applyMatrix4(originMatrix);
-                        }
-
-                        jointGroup.add(childLink);
-                        parentLink.add(jointGroup);
-                        this.jointObjects.set(jointName, jointGroup);
-
-                        // Add joint axis visualization
-                        const jointAxis = jointData.axis || [0, 0, 1];
-                        const axisHelper = new THREE.ArrowHelper(
-                            new THREE.Vector3(jointAxis[0], jointAxis[1], jointAxis[2]),
-                            new THREE.Vector3(0, 0, 0),
-                            0.2,
-                            0xff0000
-                        );
-                        jointGroup.add(axisHelper);
-                    }
-                }
-
-                // Add root links to the robot model
-                for (const rootLink of robotData.rootLinks) {
-                    const rootObject = linkObjects.get(rootLink);
-                    if (rootObject) {
-                        this.robotModel.add(rootObject);
-                    }
-                }
-
+                // Initialize utility classes
+                this.robotVisualizer = new RobotVisualizer(this.scene, this.logger);
+                this.robotModel = await this.robotVisualizer.visualizeRobot(robotData);
+                this.jointObjects = this.robotVisualizer.jointObjects;
+                
                 // Calculate bounding box and adjust camera
                 const box = new THREE.Box3().setFromObject(this.robotModel);
                 const size = box.getSize(new THREE.Vector3());
@@ -1300,7 +1235,6 @@
                 // Calculate camera distance based on robot size
                 const maxDim = Math.max(size.x, size.y, size.z);
                 const distance = maxDim * 2;
-                const aspectRatio = this.camera.aspect;
                 
                 // Position camera for proper Z-up view
                 this.camera.position.set(distance, distance, distance);
@@ -1322,195 +1256,18 @@
                 this.endEffectorName = links[links.length - 1];
                 this.logger.info(`Set end effector to: ${this.endEffectorName}`);
 
+                // Initialize RobotKinematics
+                this.robotKinematics = new RobotKinematics(robotData, this.endEffectorName);
+
+                // Initialize PerformanceMonitor
+                this.performanceMonitor = new PerformanceMonitor(this.logger);
+
                 this.logger.success('Robot visualization complete');
             }
 
-            async loadMesh(filename) {
-                return new Promise((resolve, reject) => {
-                    const meshPath = `/public/models/meshes/${filename}`;
-                    this.logger.info(`Loading mesh: ${meshPath}`);
-                    
-                    if (filename.toLowerCase().endsWith('.stl')) {
-                        this.stlLoader.load(
-                            meshPath,
-                            (geometry) => {
-                                geometry.computeBoundingBox();
-                                const center = new THREE.Vector3();
-                                geometry.boundingBox.getCenter(center);
-                                geometry.center();
-                                
-                                // Create material with proper settings for STL
-                                const material = new THREE.MeshPhongMaterial({ 
-                                    color: 0x808080,
-                                    shininess: 30,
-                                    specular: 0x111111
-                                });
-                                
-                                const mesh = new THREE.Mesh(geometry, material);
-                                
-                                // Fix for STL files - ensure proper orientation
-                                // This rotates from STL's coordinate system to match the URDF/DAE coordinate system
-                                mesh.rotation.set(-Math.PI/2, 0, 0);
-                                
-                                this.logger.success(`Successfully loaded STL: ${filename} with coordinate system correction`);
-                                resolve(mesh);
-                            },
-                            (progress) => {
-                                if (progress.lengthComputable) {
-                                    const percentComplete = (progress.loaded / progress.total) * 100;
-                                    this.logger.info(`Loading ${filename}: ${Math.round(percentComplete)}%`);
-                                }
-                            },
-                            (error) => {
-                                this.logger.error(`Failed to load STL: ${filename} - ${error.message}`);
-                                reject(error);
-                            }
-                        );
-                    } else if (filename.toLowerCase().endsWith('.dae')) {
-                        this.colladaLoader.load(
-                            meshPath,
-                            (collada) => {
-                                // Ensure proper matrix updates for the entire DAE scene
-                                collada.scene.traverse((child) => {
-                                    if (child instanceof THREE.Mesh) {
-                                        child.matrixAutoUpdate = true;
-                                        child.updateMatrix();
-                                    }
-                                });
-                                
-                                this.logger.success(`Successfully loaded DAE: ${filename}`);
-                                resolve(collada.scene);
-                            },
-                            (progress) => {
-                                if (progress.lengthComputable) {
-                                    const percentComplete = (progress.loaded / progress.total) * 100;
-                                    this.logger.info(`Loading ${filename}: ${Math.round(percentComplete)}%`);
-                                }
-                            },
-                            (error) => {
-                                this.logger.error(`Failed to load DAE: ${filename} - ${error.message}`);
-                                reject(error);
-                            }
-                        );
-                    } else {
-                        const error = new Error(`Unsupported file format: ${filename}`);
-                        this.logger.error(error.message);
-                        reject(error);
-                    }
-                });
-            }
-
-            createTargetPose() {
-                // Create a group for the target pose
-                this.targetPose = new THREE.Group();
-                
-                // Create axes for the target pose (gnomon)
-                const axesHelper = new THREE.AxesHelper(0.1); // Smaller axes
-                this.targetPose.add(axesHelper);
-
-                // Create a label for the target
-                const canvas = document.createElement('canvas');
-                const context = canvas.getContext('2d');
-                canvas.width = 128; // Smaller canvas
-                canvas.height = 32; // Smaller canvas
-                context.fillStyle = '#ffffff';
-                context.font = 'bold 24px Arial'; // Smaller font
-                context.textAlign = 'center';
-                context.fillText('Target', 64, 24);
-
-                const texture = new THREE.CanvasTexture(canvas);
-                const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
-                const sprite = new THREE.Sprite(spriteMaterial);
-                sprite.scale.set(0.25, 0.0625, 1); // Smaller sprite
-                sprite.position.set(0, 0, 0.15); // Position closer to axes
-                this.targetPose.add(sprite);
-
-                // Position the target pose
-                this.targetPose.position.set(1, 1, 1);
-                this.scene.add(this.targetPose);
-
-                // Attach transform controls to target pose
-                this.transformControls.attach(this.targetPose);
-                this.transformControls.setMode('translate'); // Start in translate mode
-                this.transformControls.setSize(0.8); // Make handles slightly smaller
-            }
-
             calculateFK(jointAngles) {
-                // Early exit if no end effector
-                if (!this.endEffectorName) return null;
-
-                // Find the chain of joints and links from end effector to root
-                const chain = [];
-                let currentLink = this.endEffectorName;
-                
-                while (currentLink) {
-                    // Find the joint that has this link as its child
-                    let foundJoint = null;
-                    let parentLink = null;
-                    
-                    for (const [jointName, jointData] of this.urdfReader.robot.joints) {
-                        if (jointData.child === currentLink) {
-                            foundJoint = jointData;
-                            parentLink = jointData.parent;
-                            chain.unshift({
-                                joint: jointData,
-                                childLink: currentLink,
-                                parentLink: parentLink
-                            });
-                            break;
-                        }
-                    }
-                    
-                    if (!parentLink) break;
-                    currentLink = parentLink;
-                }
-
-                // Start with identity matrix at the root
-                const result = new THREE.Matrix4();
-
-                // Apply root offset if the robot model has one
-                if (this.robotModel.position) {
-                    result.setPosition(this.robotModel.position);
-                }
-
-                // Multiply matrices in chain from root to tip
-                for (const { joint, childLink } of chain) {
-                    // Get joint angle
-                    const angle = jointAngles.get(joint.name) || 0;
-                    
-                    // Create joint transform
-                    const jointTransform = TransformationUtils.createTransformMatrix(
-                        joint.origin?.xyz || [0, 0, 0],
-                        joint.origin?.rpy || [0, 0, 0]
-                    );
-
-                    // Apply joint rotation
-                    const axis = joint.axis || [0, 0, 1];
-                    const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
-                    const rotQuat = new THREE.Quaternion();
-                    rotQuat.setFromAxisAngle(axisVec, angle);
-                    const rotMatrix = new THREE.Matrix4();
-                    rotMatrix.makeRotationFromQuaternion(rotQuat);
-                    
-                    // Combine transforms
-                    result.multiply(jointTransform);
-                    result.multiply(rotMatrix);
-
-                    // Get child link data
-                    const childLinkData = this.urdfReader.robot.links.get(childLink);
-                    
-                    // Apply visual offset if present
-                    if (childLinkData && childLinkData.visual && childLinkData.visual.origin) {
-                        const visualTransform = TransformationUtils.createTransformMatrix(
-                            childLinkData.visual.origin.xyz || [0, 0, 0],
-                            childLinkData.visual.origin.rpy || [0, 0, 0]
-                        );
-                        result.multiply(visualTransform);
-                    }
-                }
-
-                // Extract position and orientation using our utility
-                return TransformationUtils.decomposeTransform(result);
+                if (!this.robotKinematics) return null;
+                return this.robotKinematics.calculateFK(jointAngles, this.robotModel.position);
             }
 
             createPositionMarker(color) {
