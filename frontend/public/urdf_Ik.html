@@ -25,6 +25,7 @@
                 loadScript('https://unpkg.com/three@0.140.0/examples/js/loaders/ColladaLoader.js'),
                 loadScript('https://unpkg.com/three@0.140.0/examples/js/controls/OrbitControls.js'),
                 loadScript('https://unpkg.com/three@0.140.0/examples/js/controls/TransformControls.js'),
+                loadScript('js/urdf-utils.js'),
                 loadScript('urdfreader.js')
             ]).then(() => {
                 // Initialize the viewer after all scripts are loaded
@@ -687,31 +688,22 @@
                 const targetPos = new THREE.Vector3();
                 this.targetPose.getWorldPosition(targetPos);
                 
-                // Calculate position difference
-                const positionDistance = endEffectorPos.distanceTo(targetPos);
-                
-                // Calculate rotation difference
-                const endEffectorQuat = new THREE.Quaternion();
                 const targetQuat = new THREE.Quaternion();
-                
-                // Get world quaternions
                 this.targetPose.getWorldQuaternion(targetQuat);
+                
+                const endEffectorQuat = new THREE.Quaternion();
                 const endEffectorObject = this.findObjectByName(this.robotModel, this.endEffectorName);
                 if (endEffectorObject) {
                     endEffectorObject.getWorldQuaternion(endEffectorQuat);
                 }
                 
-                // Calculate angle between quaternions (in radians)
-                const dotProduct = Math.abs(endEffectorQuat.dot(targetQuat));
-                const rotationDistance = Math.acos(Math.min(1, Math.max(-1, 2 * dotProduct * dotProduct - 1)));
-                
-                // Use the dynamic rotation weight from the slider
-                const positionWeight = 1.0;
-                
-                // Combined weighted cost
-                const totalCost = (positionWeight * positionDistance) + (this.rotationWeight * rotationDistance);
-                
-                return totalCost;
+                return CostCalculator.calculateCombinedCost(
+                    endEffectorPos,
+                    targetPos,
+                    endEffectorQuat,
+                    targetQuat,
+                    this.rotationWeight
+                );
             }
 
             setBestSolution() {
@@ -950,30 +942,7 @@
                         const jointObject = this.jointObjects.get(jointName);
                         if (jointObject) {
                             const jointData = this.urdfReader.robot.joints.get(jointName);
-                            
-                            // Reset transformation
-                            jointObject.position.set(0, 0, 0);
-                            jointObject.quaternion.set(0, 0, 0, 1);
-                            
-                            // Apply original transform from URDF
-                            if (jointData.origin) {
-                                const xyz = jointData.origin.xyz || [0, 0, 0];
-                                const rpy = jointData.origin.rpy || [0, 0, 0];
-                                jointObject.position.set(xyz[0], xyz[1], xyz[2]);
-                                const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
-                                jointObject.setRotationFromEuler(euler);
-                            }
-                            
-                            // Apply joint rotation
-                            const axis = jointData.axis || [0, 0, 1];
-                            const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
-                            const rotQuat = new THREE.Quaternion();
-                            rotQuat.setFromAxisAngle(axisVec, angle);
-                            jointObject.quaternion.multiply(rotQuat);
-
-                            // Force update of matrix
-                            jointObject.updateMatrix();
-                            jointObject.updateMatrixWorld(true);
+                            TransformationUtils.applyJointTransform(jointObject, jointData, angle);
                         }
                     } catch (error) {
                         this.logger.error(`Error applying configuration for joint ${jointName}: ${error.message}`);
@@ -1505,66 +1474,43 @@
                 }
 
                 // Multiply matrices in chain from root to tip
-                for (const item of chain) {
-                    const jointData = item.joint;
+                for (const { joint, childLink } of chain) {
+                    // Get joint angle
+                    const angle = jointAngles.get(joint.name) || 0;
                     
-                    // Apply joint origin transform
-                    if (jointData.origin) {
-                        const xyz = jointData.origin.xyz || [0, 0, 0];
-                        const rpy = jointData.origin.rpy || [0, 0, 0];
-                        const originMatrix = new THREE.Matrix4();
-                        const position = new THREE.Vector3(xyz[0], xyz[1], xyz[2]);
-                        const quaternion = new THREE.Quaternion().setFromEuler(
-                            new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ')
-                        );
-                        originMatrix.compose(position, quaternion, new THREE.Vector3(1, 1, 1));
-                        result.multiply(originMatrix);
-                    }
+                    // Create joint transform
+                    const jointTransform = TransformationUtils.createTransformMatrix(
+                        joint.origin?.xyz || [0, 0, 0],
+                        joint.origin?.rpy || [0, 0, 0]
+                    );
 
-                    // Apply joint motion
-                    if ((jointData.type === 'revolute' || jointData.type === 'prismatic') && jointAngles.has(jointData.name)) {
-                        const angle = jointAngles.get(jointData.name);
-                        const axis = jointData.axis || [0, 0, 1];
-                        const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
-                        const jointMatrix = new THREE.Matrix4();
+                    // Apply joint rotation
+                    const axis = joint.axis || [0, 0, 1];
+                    const axisVec = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
+                    const rotQuat = new THREE.Quaternion();
+                    rotQuat.setFromAxisAngle(axisVec, angle);
+                    const rotMatrix = new THREE.Matrix4();
+                    rotMatrix.makeRotationFromQuaternion(rotQuat);
+                    
+                    // Combine transforms
+                    result.multiply(jointTransform);
+                    result.multiply(rotMatrix);
 
-                        if (jointData.type === 'revolute') {
-                            jointMatrix.makeRotationAxis(axisVec, angle);
-                        } else {
-                            jointMatrix.makeTranslation(
-                                axisVec.x * angle,
-                                axisVec.y * angle,
-                                axisVec.z * angle
-                            );
-                        }
-                        result.multiply(jointMatrix);
-                    }
-
-                    // Get the child link's visual transform if it exists
-                    const childLinkData = this.urdfReader.robot.links.get(item.childLink);
+                    // Get child link data
+                    const childLinkData = this.urdfReader.robot.links.get(childLink);
+                    
+                    // Apply visual offset if present
                     if (childLinkData && childLinkData.visual && childLinkData.visual.origin) {
-                        const xyz = childLinkData.visual.origin.xyz || [0, 0, 0];
-                        const rpy = childLinkData.visual.origin.rpy || [0, 0, 0];
-                        const visualMatrix = new THREE.Matrix4();
-                        const position = new THREE.Vector3(xyz[0], xyz[1], xyz[2]);
-                        const quaternion = new THREE.Quaternion().setFromEuler(
-                            new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ')
+                        const visualTransform = TransformationUtils.createTransformMatrix(
+                            childLinkData.visual.origin.xyz || [0, 0, 0],
+                            childLinkData.visual.origin.rpy || [0, 0, 0]
                         );
-                        visualMatrix.compose(position, quaternion, new THREE.Vector3(1, 1, 1));
-                        result.multiply(visualMatrix);
+                        result.multiply(visualTransform);
                     }
                 }
 
-                // Extract position and orientation
-                const position = new THREE.Vector3();
-                const quaternion = new THREE.Quaternion();
-                const scale = new THREE.Vector3();
-                result.decompose(position, quaternion, scale);
-
-                return {
-                    position: position,
-                    orientation: quaternion
-                };
+                // Extract position and orientation using our utility
+                return TransformationUtils.decomposeTransform(result);
             }
 
             createPositionMarker(color) {
