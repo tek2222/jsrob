@@ -229,6 +229,11 @@
                 <input type="range" id="perturbationSlider" min="0.1" max="180" step="0.1" value="10">
                 <span id="perturbationValue">10.0</span>
             </div>
+            <div class="slider-container">
+                <label for="rotationWeightSlider">Rotation/Position Cost Ratio:</label>
+                <input type="range" id="rotationWeightSlider" min="0" max="2" step="0.1" value="0.5">
+                <span id="rotationWeightValue">0.5</span>
+            </div>
             <div class="checkbox-container">
                 <label>
                     <input type="checkbox" id="showFKPoints" checked>
@@ -307,6 +312,7 @@
                 this.isExploring = false;
                 this.samplesPerFrame = 10;
                 this.perturbationRange = 10;
+                this.rotationWeight = 0.5;
                 this.controls = null;
                 this.stlLoader = null;
                 this.colladaLoader = null;
@@ -462,6 +468,14 @@
                     perturbationValue.textContent = this.perturbationRange.toFixed(1);
                 });
 
+                // Rotation weight slider
+                const rotationWeightSlider = document.getElementById('rotationWeightSlider');
+                const rotationWeightValue = document.getElementById('rotationWeightValue');
+                rotationWeightSlider.addEventListener('input', () => {
+                    this.rotationWeight = parseFloat(rotationWeightSlider.value);
+                    rotationWeightValue.textContent = this.rotationWeight.toFixed(1);
+                });
+
                 // FK Points visibility checkbox
                 const showFKPointsCheckbox = document.getElementById('showFKPoints');
                 showFKPointsCheckbox.addEventListener('change', () => {
@@ -567,6 +581,7 @@
                         this.frameStartTime = performance.now();
                         this.framePoseCount = 0;
                         let fkCalculationTime = 0;
+                        let costCalculationTime = 0;
 
                         // Perform IK iterations in two phases
                         const totalSamples = this.samplesPerFrame;
@@ -578,7 +593,8 @@
                             this.framePoseCount++;
                             const fkStartTime = performance.now();
                             this.randomizePose(1.0); // Full perturbation range
-                            fkCalculationTime += performance.now() - fkStartTime;
+                            const fkEndTime = performance.now();
+                            fkCalculationTime += fkEndTime - fkStartTime;
                         }
 
                         // Phase 2: Fine search with reduced perturbation range
@@ -586,7 +602,8 @@
                             this.framePoseCount++;
                             const fkStartTime = performance.now();
                             this.randomizePose(0.1); // 10% of perturbation range
-                            fkCalculationTime += performance.now() - fkStartTime;
+                            const fkEndTime = performance.now();
+                            fkCalculationTime += fkEndTime - fkStartTime;
                         }
 
                         // Calculate timing for this frame
@@ -661,12 +678,11 @@
                 const dotProduct = Math.abs(endEffectorQuat.dot(targetQuat));
                 const rotationDistance = Math.acos(Math.min(1, Math.max(-1, 2 * dotProduct * dotProduct - 1)));
                 
-                // Weight factors for position and rotation
+                // Use the dynamic rotation weight from the slider
                 const positionWeight = 1.0;
-                const rotationWeight = 0.5; // Adjust this to change the importance of rotation vs position
                 
                 // Combined weighted cost
-                const totalCost = (positionWeight * positionDistance) + (rotationWeight * rotationDistance);
+                const totalCost = (positionWeight * positionDistance) + (this.rotationWeight * rotationDistance);
                 
                 return totalCost;
             }
@@ -747,7 +763,10 @@
                     if (endEffectorObject) {
                         const currentPos = new THREE.Vector3();
                         endEffectorObject.getWorldPosition(currentPos);
+                        const costStartTime = performance.now();
                         currentDistance = this.calculatePositionCost(currentPos);
+                        const costEndTime = performance.now();
+                        this.costCalculationTime += costEndTime - costStartTime;
                     }
                 }
 
@@ -839,6 +858,12 @@
                             fkTime = fkEndTime - fkStartTime;
                         }
 
+                        // Time the cost calculation
+                        const costStartTime = performance.now();
+                        const newDistance = this.calculatePositionCost(viewerWorldPos);
+                        const costEndTime = performance.now();
+                        this.costCalculationTime += costEndTime - costStartTime;
+
                         // Update visual comparison
                         if (fkResult) {
                             this.updateFKComparison(viewerWorldPos, fkResult.position);
@@ -850,13 +875,12 @@
                                 Method: ${this.useFKFunction ? 'FK Function' : 'Direct Drawing'}
                                 Three.js FK time: ${threejsTime.toFixed(3)}ms
                                 ${this.useFKFunction ? `Our FK time: ${fkTime.toFixed(3)}ms` : ''}
+                                Cost calculation time: ${(costEndTime - costStartTime).toFixed(3)}ms
                                 Position difference: ${posDiff.toFixed(6)}
                                 Three.js position: (${viewerWorldPos.x.toFixed(4)}, ${viewerWorldPos.y.toFixed(4)}, ${viewerWorldPos.z.toFixed(4)})
                                 ${this.useFKFunction ? `Our FK position: (${fkResult.position.x.toFixed(4)}, ${fkResult.position.y.toFixed(4)}, ${fkResult.position.z.toFixed(4)})` : ''}`);
                             }
                         }
-
-                        const newDistance = this.calculatePositionCost(viewerWorldPos);
                         
                         // Add FK point for visualization
                         this.addFKPoint(viewerWorldPos);
@@ -1169,12 +1193,19 @@
                                         const xyz = linkData.visual.origin.xyz || [0, 0, 0];
                                         const rpy = linkData.visual.origin.rpy || [0, 0, 0];
                                         
+                                        // For STL files, handle orientation differently
                                         if (filename.toLowerCase().endsWith('.stl')) {
+                                            // Apply position
                                             mesh.position.set(xyz[0], xyz[1], xyz[2]);
+                                            
+                                            // Create a rotation matrix from the URDF RPY values
                                             const euler = new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ');
                                             const quaternion = new THREE.Quaternion().setFromEuler(euler);
+                                            
+                                            // Combine with the existing rotation (which corrects the coordinate system)
                                             mesh.quaternion.premultiply(quaternion);
                                         } else {
+                                            // For DAE files, apply transform normally
                                             mesh.position.set(xyz[0], xyz[1], xyz[2]);
                                             mesh.rotation.set(rpy[0], rpy[1], rpy[2]);
                                         }
@@ -1216,8 +1247,15 @@
                         if (jointData.origin) {
                             const xyz = jointData.origin.xyz || [0, 0, 0];
                             const rpy = jointData.origin.rpy || [0, 0, 0];
-                            jointGroup.position.set(xyz[0], xyz[1], xyz[2]);
-                            jointGroup.rotation.set(rpy[0], rpy[1], rpy[2]);
+                            
+                            // Apply transformations using matrix operations
+                            const originMatrix = new THREE.Matrix4();
+                            const position = new THREE.Vector3(xyz[0], xyz[1], xyz[2]);
+                            const quaternion = new THREE.Quaternion().setFromEuler(
+                                new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ')
+                            );
+                            originMatrix.compose(position, quaternion, new THREE.Vector3(1, 1, 1));
+                            jointGroup.applyMatrix4(originMatrix);
                         }
 
                         jointGroup.add(childLink);
@@ -1229,7 +1267,7 @@
                         const axisHelper = new THREE.ArrowHelper(
                             new THREE.Vector3(jointAxis[0], jointAxis[1], jointAxis[2]),
                             new THREE.Vector3(0, 0, 0),
-                            0.2,  // Shorter length for less visual clutter
+                            0.2,
                             0xff0000
                         );
                         jointGroup.add(axisHelper);
@@ -1249,15 +1287,39 @@
                 const size = box.getSize(new THREE.Vector3());
                 const center = box.getCenter(new THREE.Vector3());
 
-                // Only adjust Z position to place robot on ground
-                this.robotModel.position.set(0, 0, -box.min.z);
+                // Reset robot position and rotation
+                this.robotModel.position.set(0, 0, 0);
+                this.robotModel.rotation.set(0, 0, 0);
+                this.robotModel.updateMatrixWorld(true);
 
-                // Adjust camera distance based on robot size without scaling
+                // Recalculate bounding box after reset
+                box.setFromObject(this.robotModel);
+                box.getSize(size);
+                box.getCenter(center);
+
+                // Center the robot and place it on the ground
+                this.robotModel.position.set(-center.x, -center.y, -box.min.z);
+                this.robotModel.updateMatrixWorld(true);
+
+                // Calculate camera distance based on robot size
                 const maxDim = Math.max(size.x, size.y, size.z);
                 const distance = maxDim * 2;
+                const aspectRatio = this.camera.aspect;
+                
+                // Position camera for proper Z-up view
                 this.camera.position.set(distance, distance, distance);
-                this.camera.up.set(0, 0, 1); // Ensure Z is up
+                this.camera.up.set(0, 0, 1);
                 this.camera.lookAt(0, 0, 0);
+
+                // Adjust camera parameters
+                this.camera.near = distance * 0.01;
+                this.camera.far = distance * 10;
+                this.camera.fov = 45;
+                this.camera.updateProjectionMatrix();
+
+                // Reset controls
+                this.controls.target.set(0, 0, 0);
+                this.controls.update();
 
                 // Find the end effector (last link in the chain)
                 const links = Array.from(robotData.links.keys());
@@ -1276,41 +1338,25 @@
                         this.stlLoader.load(
                             meshPath,
                             (geometry) => {
-                                // Force recomputation of normals
-                                geometry.computeFaceNormals();
-                                geometry.computeVertexNormals();
-                                
-                                // Specifically handle the last joint's normals
-                                if (filename.includes('tool0') || filename.includes('link_6')) {
-                                    // Flip normals by inverting them directly
-                                    const normals = geometry.attributes.normal.array;
-                                    for (let i = 0; i < normals.length; i++) {
-                                        normals[i] = -normals[i];
-                                    }
-                                    geometry.attributes.normal.needsUpdate = true;
-                                }
-                                
                                 geometry.computeBoundingBox();
+                                const center = new THREE.Vector3();
+                                geometry.boundingBox.getCenter(center);
+                                geometry.center();
                                 
                                 // Create material with proper settings for STL
                                 const material = new THREE.MeshPhongMaterial({ 
                                     color: 0x808080,
                                     shininess: 30,
-                                    specular: 0x111111,
-                                    side: THREE.FrontSide,
-                                    flatShading: false,
-                                    transparent: false,
-                                    opacity: 1.0,
-                                    depthWrite: true,
-                                    depthTest: true
+                                    specular: 0x111111
                                 });
                                 
                                 const mesh = new THREE.Mesh(geometry, material);
                                 
-                                // Don't apply any initial rotation, preserve original orientation
-                                mesh.updateMatrix();
+                                // Fix for STL files - ensure proper orientation
+                                // This rotates from STL's coordinate system to match the URDF/DAE coordinate system
+                                mesh.rotation.set(-Math.PI/2, 0, 0);
                                 
-                                this.logger.success(`Successfully loaded STL: ${filename}`);
+                                this.logger.success(`Successfully loaded STL: ${filename} with coordinate system correction`);
                                 resolve(mesh);
                             },
                             (progress) => {
@@ -1328,6 +1374,14 @@
                         this.colladaLoader.load(
                             meshPath,
                             (collada) => {
+                                // Ensure proper matrix updates for the entire DAE scene
+                                collada.scene.traverse((child) => {
+                                    if (child instanceof THREE.Mesh) {
+                                        child.matrixAutoUpdate = true;
+                                        child.updateMatrix();
+                                    }
+                                });
+                                
                                 this.logger.success(`Successfully loaded DAE: ${filename}`);
                                 resolve(collada.scene);
                             },
