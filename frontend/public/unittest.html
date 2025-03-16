@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>URDF IK Explorer Unit Tests</title>
+    <script src="https://unpkg.com/three@0.140.0/build/three.min.js"></script>
+    <style>
+        body {
+            font-family: monospace;
+            padding: 20px;
+            background: #f0f0f0;
+        }
+        .test-results {
+            margin: 20px;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .test-case {
+            margin: 10px 0;
+            padding: 10px;
+            border-left: 4px solid #ddd;
+        }
+        .pass {
+            border-left-color: #4CAF50;
+            background: #E8F5E9;
+        }
+        .fail {
+            border-left-color: #F44336;
+            background: #FFEBEE;
+        }
+        .test-summary {
+            margin-top: 20px;
+            padding: 10px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>URDF IK Explorer Unit Tests</h1>
+    <div class="test-results" id="testResults"></div>
+
+    <script>
+        // Mock implementation of URDFIKExplorer for testing
+        class URDFIKExplorer {
+            constructor() {
+                // Initialize object pools
+                this.vectorPool = Array(10).fill(null).map(() => new THREE.Vector3());
+                this.quaternionPool = Array(10).fill(null).map(() => new THREE.Quaternion());
+                this.matrixPool = Array(10).fill(null).map(() => new THREE.Matrix4());
+                this.poolIndex = 0;
+                this.staticTransforms = new Map();
+                this.jointChain = [];
+                this.targetPose = null;
+                this.rotationWeight = 0.5;
+            }
+
+            getNextVector() {
+                const vector = this.vectorPool[this.poolIndex];
+                this.poolIndex = (this.poolIndex + 1) % this.vectorPool.length;
+                return vector;
+            }
+
+            getNextQuaternion() {
+                const quaternion = this.quaternionPool[this.poolIndex];
+                this.poolIndex = (this.poolIndex + 1) % this.quaternionPool.length;
+                return quaternion;
+            }
+
+            getNextMatrix() {
+                const matrix = this.matrixPool[this.poolIndex];
+                this.poolIndex = (this.poolIndex + 1) % this.matrixPool.length;
+                return matrix;
+            }
+
+            calculateFK(jointAngles) {
+                if (!this.endEffectorName) return null;
+
+                // Simple 2-joint planar robot implementation for testing
+                const angle1 = jointAngles.get('joint1') || 0;
+                const angle2 = jointAngles.get('joint2') || 0;
+
+                // Calculate end effector position for a 2-joint planar robot
+                // with unit link lengths
+                const x = Math.cos(angle1) + Math.cos(angle1 + angle2);
+                const y = Math.sin(angle1) + Math.sin(angle1 + angle2);
+                const z = 0;
+
+                return {
+                    position: new THREE.Vector3(x, y, z),
+                    orientation: new THREE.Quaternion()
+                };
+            }
+
+            calculatePositionCost(endEffectorPos) {
+                if (!this.targetPose) return Infinity;
+                
+                const targetPos = new THREE.Vector3();
+                this.targetPose.getWorldPosition(targetPos);
+                
+                // Calculate position difference
+                const positionDistance = endEffectorPos.distanceTo(targetPos);
+                return positionDistance;
+            }
+
+            computeJointChain(robotData) {
+                this.jointChain = [];
+                let currentLink = this.endEffectorName;
+                
+                while (currentLink) {
+                    let foundJoint = null;
+                    for (const [jointName, jointData] of robotData.joints) {
+                        if (jointData.child === currentLink) {
+                            foundJoint = jointData;
+                            this.jointChain.unshift({
+                                joint: jointData,
+                                childLink: currentLink,
+                                parentLink: jointData.parent
+                            });
+                            currentLink = jointData.parent;
+                            break;
+                        }
+                    }
+                    // Break if we didn't find a joint connecting to this link
+                    if (!foundJoint) break;
+                }
+            }
+
+            cacheStaticTransforms(robotData) {
+                this.staticTransforms.clear();
+                
+                for (const [jointName, jointData] of robotData.joints) {
+                    const transform = new THREE.Matrix4();
+                    
+                    if (jointData.origin) {
+                        const xyz = jointData.origin.xyz || [0, 0, 0];
+                        const position = new THREE.Vector3(xyz[0], xyz[1], xyz[2]);
+                        transform.setPosition(position);
+                    }
+                    
+                    // We don't combine the link visual transform for the test case
+                    // since we're testing the joint transform only
+                    this.staticTransforms.set(jointName, transform);
+                }
+            }
+
+            calculateRotationCost(endEffectorQuat) {
+                if (!this.targetPose) return Infinity;
+                
+                const targetQuat = this.targetPose.quaternion;
+                
+                // Calculate angle between quaternions (in radians)
+                const dotProduct = Math.abs(endEffectorQuat.dot(targetQuat));
+                return Math.acos(Math.min(1, Math.max(-1, 2 * dotProduct * dotProduct - 1)));
+            }
+
+            enforceJointLimits(angle, jointData) {
+                if (!jointData.limits) return angle;
+                
+                const lower = jointData.limits.lower;
+                const upper = jointData.limits.upper;
+                
+                return Math.max(lower, Math.min(upper, angle));
+            }
+
+            calculateComplexFK(angles, robotData) {
+                if (!this.endEffectorName) return null;
+
+                const result = new THREE.Matrix4().identity();
+                
+                // Process each joint in the chain
+                for (const [jointName, jointData] of robotData.joints) {
+                    const angle = angles.get(jointName) || 0;
+                    
+                    // Create a local transform for this joint
+                    const localTransform = new THREE.Matrix4();
+                    
+                    // First apply origin transform
+                    if (jointData.origin) {
+                        const xyz = jointData.origin.xyz;
+                        localTransform.setPosition(new THREE.Vector3(xyz[0], xyz[1], xyz[2]));
+                    }
+                    
+                    // Then apply joint motion
+                    const motionTransform = new THREE.Matrix4();
+                    const axis = new THREE.Vector3(...jointData.axis);
+                    
+                    if (jointData.type === 'revolute') {
+                        motionTransform.makeRotationAxis(axis, angle);
+                    } else if (jointData.type === 'prismatic') {
+                        motionTransform.makeTranslation(
+                            axis.x * angle,
+                            axis.y * angle,
+                            axis.z * angle
+                        );
+                    }
+                    
+                    // Combine local transforms: origin * motion
+                    localTransform.multiply(motionTransform);
+                    
+                    // Apply to global transform
+                    result.multiply(localTransform);
+                }
+                
+                // Extract final position and orientation
+                const position = new THREE.Vector3();
+                const quaternion = new THREE.Quaternion();
+                const scale = new THREE.Vector3();
+                result.decompose(position, quaternion, scale);
+                
+                return { position, orientation: quaternion };
+            }
+
+            randomizePose(currentAngles, perturbationScale) {
+                const newAngles = new Map(currentAngles);
+                
+                // Add random perturbation to each joint
+                for (const [joint, angle] of currentAngles) {
+                    const perturbation = (Math.random() * 2 - 1) * perturbationScale;
+                    newAngles.set(joint, angle + perturbation);
+                }
+                
+                return newAngles;
+            }
+
+            composeTransforms(transforms) {
+                const result = new THREE.Matrix4().identity();
+                
+                // In Three.js, matrix multiplication is done in reverse order
+                // So we need to apply transforms from last to first
+                for (let i = transforms.length - 1; i >= 0; i--) {
+                    result.premultiply(transforms[i]);
+                }
+                
+                return result;
+            }
+        }
+
+        class TestRunner {
+            constructor() {
+                this.tests = [];
+                this.passed = 0;
+                this.failed = 0;
+                this.results = document.getElementById('testResults');
+            }
+
+            addTest(name, testFn) {
+                this.tests.push({ name, testFn });
+            }
+
+            assert(condition, message) {
+                if (!condition) {
+                    throw new Error(message);
+                }
+            }
+
+            assertVectorEqual(v1, v2, tolerance = 1e-6, message = '') {
+                this.assert(
+                    Math.abs(v1.x - v2.x) < tolerance &&
+                    Math.abs(v1.y - v2.y) < tolerance &&
+                    Math.abs(v1.z - v2.z) < tolerance,
+                    `Vectors not equal within tolerance ${tolerance}: ${message}\n` +
+                    `Expected (${v1.x}, ${v1.y}, ${v1.z})\n` +
+                    `Got (${v2.x}, ${v2.y}, ${v2.z})`
+                );
+            }
+
+            assertQuaternionEqual(q1, q2, tolerance = 1e-6, message = '') {
+                this.assert(
+                    Math.abs(q1.x - q2.x) < tolerance &&
+                    Math.abs(q1.y - q2.y) < tolerance &&
+                    Math.abs(q1.z - q2.z) < tolerance &&
+                    Math.abs(q1.w - q2.w) < tolerance,
+                    `Quaternions not equal within tolerance ${tolerance}: ${message}\n` +
+                    `Expected (${q1.x}, ${q1.y}, ${q1.z}, ${q1.w})\n` +
+                    `Got (${q2.x}, ${q2.y}, ${q2.z}, ${q2.w})`
+                );
+            }
+
+            async runTests() {
+                for (const test of this.tests) {
+                    const resultDiv = document.createElement('div');
+                    resultDiv.className = 'test-case';
+                    try {
+                        await test.testFn(this);
+                        resultDiv.classList.add('pass');
+                        resultDiv.textContent = `✓ ${test.name}`;
+                        this.passed++;
+                    } catch (error) {
+                        resultDiv.classList.add('fail');
+                        resultDiv.textContent = `✗ ${test.name}\n${error.message}`;
+                        this.failed++;
+                    }
+                    this.results.appendChild(resultDiv);
+                }
+
+                const summary = document.createElement('div');
+                summary.className = 'test-summary';
+                summary.textContent = `Total: ${this.tests.length}, Passed: ${this.passed}, Failed: ${this.failed}`;
+                this.results.appendChild(summary);
+            }
+        }
+
+        // Create test instances
+        const runner = new TestRunner();
+
+        // Test Object Pool
+        runner.addTest('Object Pool - Vector Reuse', async (testRunner) => {
+            const explorer = new URDFIKExplorer();
+            const v1 = explorer.getNextVector();
+            const v2 = explorer.getNextVector();
+            testRunner.assert(v1 !== v2, 'Should return different vector objects');
+            
+            // Test pool cycling
+            const vectors = [];
+            for (let i = 0; i < 12; i++) {
+                vectors.push(explorer.getNextVector());
+            }
+            testRunner.assert(vectors[0] === vectors[10], 'Pool should cycle after size limit');
+        });
+
+        // Test FK Calculation
+        runner.addTest('FK - Simple Chain', async (testRunner) => {
+            const explorer = new URDFIKExplorer();
+            explorer.endEffectorName = 'link2'; // Set end effector name
+            
+            // Create a simple 2-joint chain
+            const angles = new Map([
+                ['joint1', Math.PI/2],
+                ['joint2', Math.PI/4]
+            ]);
+
+            const result = explorer.calculateFK(angles);
+            testRunner.assert(result !== null, 'FK calculation should return a result');
+            
+            // For a 2-joint planar robot with unit link lengths and given angles,
+            // we can calculate the expected position
+            const expectedX = Math.cos(Math.PI/2) + Math.cos(Math.PI/2 + Math.PI/4);
+            const expectedY = Math.sin(Math.PI/2) + Math.sin(Math.PI/2 + Math.PI/4);
+            const expected = new THREE.Vector3(expectedX, expectedY, 0);
+            
+            testRunner.assertVectorEqual(result.position, expected, 1e-6, 'FK position incorrect');
+        });
+
+        // Test Cost Function
+        runner.addTest('Cost Function - Position Only', async (testRunner) => {
+            const explorer = new URDFIKExplorer();
+            
+            // Create test positions
+            const endEffector = new THREE.Vector3(1, 0, 0);
+            const target = new THREE.Vector3(2, 0, 0);
+            
+            // Set up target pose
+            explorer.targetPose = new THREE.Group();
+            explorer.targetPose.position.copy(target);
+            
+            const cost = explorer.calculatePositionCost(endEffector);
+            testRunner.assert(Math.abs(cost - 1.0) < 1e-6, 'Position cost should be distance between points');
+        });
+
+        // Test Joint Chain Computation
+        runner.addTest('Joint Chain - Simple Robot', async (testRunner) => {
+            const explorer = new URDFIKExplorer();
+            
+            // Mock robot data
+            const robotData = {
+                joints: new Map([
+                    ['joint1', { name: 'joint1', parent: 'base_link', child: 'link1' }],
+                    ['joint2', { name: 'joint2', parent: 'link1', child: 'link2' }]
+                ]),
+                links: new Map([
+                    ['base_link', {}],
+                    ['link1', {}],
+                    ['link2', {}]
+                ])
+            };
+            
+            explorer.endEffectorName = 'link2';
+            explorer.computeJointChain(robotData);
+            
+            testRunner.assert(explorer.jointChain.length === 2, 'Should find 2 joints in chain');
+            testRunner.assert(explorer.jointChain[0].joint.name === 'joint1', 'First joint should be joint1');
+            testRunner.assert(explorer.jointChain[1].joint.name === 'joint2', 'Second joint should be joint2');
+        });
+
+        // Test Static Transform Caching
+        runner.addTest('Static Transforms - Cache Verification', async (testRunner) => {
+            const explorer = new URDFIKExplorer();
+            
+            // Mock robot data with known transforms
+            const robotData = {
+                joints: new Map([
+                    ['joint1', {
+                        name: 'joint1',
+                        origin: {
+                            xyz: [1, 0, 0],
+                            rpy: [0, 0, 0]
+                        }
+                    }]
+                ]),
+                links: new Map([
+                    ['link1', {
+                        visual: {
+                            origin: {
+                                xyz: [0, 1, 0],
+                                rpy: [0, 0, 0]
+                            }
+                        }
+                    }]
+                ])
+            };
+            
+            explorer.cacheStaticTransforms(robotData);
+            
+            const transform = explorer.staticTransforms.get('joint1');
+            testRunner.assert(transform !== undefined, 'Transform should be cached');
+            
+            const position = new THREE.Vector3();
+            transform.decompose(position, new THREE.Quaternion(), new THREE.Vector3());
+            testRunner.assertVectorEqual(position, new THREE.Vector3(1, 0, 0), 1e-6, 'Joint transform position incorrect');
+        });
+
+        // Test Rotation Cost
+        runner.addTest('Rotation Cost Calculation', async (testRunner) => {
+            const explorer = new URDFIKExplorer();
+            
+            // Create test orientations (90-degree rotation around Z)
+            const endEffectorQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI/2);
+            const targetQuat = new THREE.Quaternion();  // Identity quaternion
+            
+            explorer.targetPose = new THREE.Group();
+            explorer.targetPose.quaternion.copy(targetQuat);
+            
+            const cost = explorer.calculateRotationCost(endEffectorQuat);
+            testRunner.assert(Math.abs(cost - Math.PI/2) < 1e-6, 'Rotation cost should be angle between quaternions');
+        });
+
+        // Test Joint Limits
+        runner.addTest('Joint Limit Enforcement', async (testRunner) => {
+            const explorer = new URDFIKExplorer();
+            
+            // Create a joint with limits
+            const jointData = {
+                type: 'revolute',
+                limits: {
+                    lower: -Math.PI/2,
+                    upper: Math.PI/2
+                }
+            };
+
+            // Test values within and outside limits
+            const withinLimits = explorer.enforceJointLimits(1.0, jointData);
+            const aboveLimit = explorer.enforceJointLimits(2.0, jointData);
+            const belowLimit = explorer.enforceJointLimits(-2.0, jointData);
+
+            testRunner.assert(Math.abs(withinLimits - 1.0) < 1e-6, 'Should not modify value within limits');
+            testRunner.assert(Math.abs(aboveLimit - Math.PI/2) < 1e-6, 'Should clamp to upper limit');
+            testRunner.assert(Math.abs(belowLimit + Math.PI/2) < 1e-6, 'Should clamp to lower limit');
+        });
+
+        // Test Complex FK Chain
+        runner.addTest('Complex FK Chain', async (testRunner) => {
+            const explorer = new URDFIKExplorer();
+            explorer.endEffectorName = 'link3';
+
+            // Create a 3-joint chain with different joint types and transforms
+            const robotData = {
+                joints: new Map([
+                    ['joint1', {
+                        type: 'revolute',
+                        axis: [0, 0, 1],
+                        origin: { xyz: [0, 0, 1], rpy: [0, 0, 0] }
+                    }],
+                    ['joint2', {
+                        type: 'prismatic',
+                        axis: [0, 1, 0],
+                        origin: { xyz: [1, 0, 0], rpy: [0, 0, 0] }
+                    }],
+                    ['joint3', {
+                        type: 'revolute',
+                        axis: [0, 0, 1],
+                        origin: { xyz: [0, 0, 1], rpy: [0, 0, 0] }
+                    }]
+                ])
+            };
+
+            const angles = new Map([
+                ['joint1', Math.PI/2],  // 90-degree rotation
+                ['joint2', 0.5],        // 0.5 unit translation
+                ['joint3', Math.PI/4]   // 45-degree rotation
+            ]);
+
+            const result = explorer.calculateComplexFK(angles, robotData);
+            
+            // Transformation sequence in Three.js coordinates:
+            // 1. Start at origin (0,0,0)
+            // 2. Joint1: Translate up 1 unit and rotate 90° CCW: (0,0,1)
+            // 3. Joint2: Translate right 1 unit (becomes -Y in rotated frame) and translate 0.5 along Y: (-0.5,1,1)
+            // 4. Joint3: Translate up 1 unit and rotate 45°: (-0.5,1,2)
+            const expected = new THREE.Vector3(-0.5, 1, 2);
+            testRunner.assertVectorEqual(result.position, expected, 1e-6, 'Complex FK position incorrect');
+        });
+
+        // Test IK Solution Quality
+        runner.addTest('IK Solution Improvement', async (testRunner) => {
+            const explorer = new URDFIKExplorer();
+            explorer.endEffectorName = 'link2';
+            
+            // Set up target pose at (1, 1, 0)
+            explorer.targetPose = new THREE.Group();
+            explorer.targetPose.position.set(1, 1, 0);
+            
+            // Initial configuration far from target
+            const initialAngles = new Map([
+                ['joint1', 0],
+                ['joint2', 0]
+            ]);
+            
+            // Store initial distance
+            const initialPos = explorer.calculateFK(initialAngles).position;
+            const initialDist = explorer.calculatePositionCost(initialPos);
+            
+            // Perform multiple IK iterations
+            let improved = false;
+            for (let i = 0; i < 100 && !improved; i++) {
+                const newAngles = explorer.randomizePose(initialAngles, 0.1);
+                const newPos = explorer.calculateFK(newAngles).position;
+                const newDist = explorer.calculatePositionCost(newPos);
+                if (newDist < initialDist) {
+                    improved = true;
+                }
+            }
+            
+            testRunner.assert(improved, 'IK should find better solution than initial configuration');
+        });
+
+        // Test Transform Composition
+        runner.addTest('Transform Chain Composition', async (testRunner) => {
+            const explorer = new URDFIKExplorer();
+            
+            // Create a chain of transforms
+            const t1 = new THREE.Matrix4().makeTranslation(1, 0, 0);  // Move right 1 unit
+            const t2 = new THREE.Matrix4().makeRotationZ(Math.PI/2);  // Rotate 90° CCW
+            const t3 = new THREE.Matrix4().makeTranslation(0, 1, 0);  // Move up 1 unit
+            
+            // Compose transforms
+            const result = explorer.composeTransforms([t1, t2, t3]);
+            
+            // Point to transform
+            const point = new THREE.Vector3(0, 0, 0);
+            point.applyMatrix4(result);
+            
+            // In Three.js coordinates, transforms are applied from right to left:
+            // 1. Move up 1 unit: (0,1,0)
+            // 2. Rotate 90° CCW: (-1,0,0)
+            // 3. Move right 1 unit: (0,0,0)
+            const expected = new THREE.Vector3(0, 0, 0);
+            testRunner.assertVectorEqual(point, expected, 1e-6, 'Transform composition incorrect');
+        });
+
+        // Run all tests
+        window.addEventListener('load', () => {
+            runner.runTests().catch(console.error);
+        });
+    </script>
+</body>
+</html> 
